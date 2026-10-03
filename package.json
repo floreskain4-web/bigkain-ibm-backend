@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "express": "^4.21.2"
+  },
+  "name": "bigkain-backend",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "type": "module",
+  "version": "1.0.0"
+}
