@@ -573,11 +573,17 @@ export function createSignerRouter(deps) {
   });
 
   // --- POST /v1/btc/bip322/verify ------------------------------------------
-  // Genuine BIP-322 verification for segwit addresses (P2WPKH, P2SH-P2WPKH,
-  // P2WSH, single-key P2TR), via the bip322-js verifier:
-  // tagged message hash ("BIP0322-signed-message"), virtual toSpend/toSign
-  // reconstruction, and witness/script verification against the claimed
-  // address's scriptPubKey. Accepts "simple" and "full" signature encodings.
+  // Genuine BIP-322 "simple" verification for segwit addresses (P2WPKH,
+  // P2SH-P2WPKH, single-key P2TR), via the bip322-js verifier: tagged message
+  // hash ("BIP0322-signed-message"), virtual toSpend/toSign reconstruction,
+  // and witness/script verification against the claimed address's
+  // scriptPubKey. Accepts the "smp"-prefixed form (BIP-322 v2.0.0) and the
+  // unprefixed backward-compat form. "ful"/"pof" (full/proof-of-funds) are
+  // explicitly rejected — the verifier library only implements "simple".
+  // P2WSH is NOT supported by the verifier library (degrades to valid:false,
+  // never a 500). A 65-byte decoded payload is a legacy BIP-137 compact
+  // signature, not a BIP-322 witness stack: it is verified down the BIP-137
+  // path in strict mode and reported with scheme "bip137-legacy".
   // P2PKH (1...) addresses keep using the legacy /verify-ownership endpoint.
   router.post('/v1/btc/bip322/verify', keyGuard, (req, res) => {
     const { address, message, signature } = req.body || {};
@@ -596,15 +602,37 @@ export function createSignerRouter(deps) {
         reason: 'P2PKH (1...) addresses use the legacy /verify-ownership endpoint; BIP-322 is for segwit addresses',
       });
     }
+    // BIP-322 v2.0.0 prefixes the base64 signature with the variant used.
+    // "smp" (simple) is routed to the verifier; "ful"/"pof" (full /
+    // proof-of-funds) are not implemented by the verifier library and are
+    // rejected with an explicit reason. No prefix = pre-finalization
+    // backward-compat form, assumed "simple".
+    let sig = signature.trim();
+    let scheme = 'bip322';
+    const prefix = sig.slice(0, 3);
+    if (prefix === 'smp') {
+      sig = sig.slice(3);
+    } else if (prefix === 'ful' || prefix === 'pof') {
+      return res.json({
+        valid: false,
+        address: addr,
+        scheme,
+        reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
+      });
+    }
+    // A 65-byte decoded payload is a legacy BIP-137 compact signature, not a
+    // BIP-322 witness stack. Label the scheme honestly instead of calling it
+    // BIP-322. (Buffer.from with 'base64' is lenient and never throws.)
+    if (Buffer.from(sig, 'base64').length === 65) scheme = 'bip137-legacy';
     let valid = false;
     try {
       // strict mode: the signature must match this exact address type.
-      valid = Bip322Verifier.verifySignature(addr, message, signature.trim(), true) === true;
+      valid = Bip322Verifier.verifySignature(addr, message, sig, true) === true;
     } catch (e) {
-      return res.json({ valid: false, address: addr, scheme: 'bip322', reason: 'unverifiable signature' });
+      return res.json({ valid: false, address: addr, scheme, reason: 'unverifiable signature' });
     }
     logEvent('bip322.verify', { address: addr, valid });
-    return res.json({ valid, address: addr, scheme: 'bip322' });
+    return res.json({ valid, address: addr, scheme });
   });
 
   return router;
