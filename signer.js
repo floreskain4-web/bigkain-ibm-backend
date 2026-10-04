@@ -79,6 +79,65 @@ export function verifyOwnershipMessage(address, message, signature) {
 }
 
 // ---------------------------------------------------------------------------
+// BIP-322 verification core, shared by the gated /v1/btc/ownership/verify
+// endpoint (segwit addresses) and the stateless /v1/btc/bip322/verify
+// endpoint. Routes by signature prefix per BIP-322 v2.0.0: "smp" (simple) is
+// verified; "ful"/"pof" (full/proof-of-funds) are rejected — the verifier
+// library only implements "simple". No prefix = pre-finalization
+// backward-compat form, assumed simple. A 65-byte decoded payload is a
+// legacy BIP-137 compact signature, not a BIP-322 witness stack, and is
+// labeled honestly as bip137-legacy. P2WSH degrades to valid:false (library
+// limitation), never a 500. Returns { valid, scheme, reason? }.
+// ---------------------------------------------------------------------------
+export function verifyBip322Signature(addr, message, signature) {
+  const a = (addr || '').trim();
+  if (a[0] === '1') {
+    return {
+      valid: false,
+      scheme: 'bip322',
+      reason: 'P2PKH (1...) addresses use the legacy /verify-ownership endpoint; BIP-322 is for segwit addresses',
+    };
+  }
+  let sig = (signature || '').trim();
+  let scheme = 'bip322';
+  const prefix = sig.slice(0, 3);
+  if (prefix === 'smp') {
+    sig = sig.slice(3);
+  } else if (prefix === 'ful' || prefix === 'pof') {
+    return {
+      valid: false,
+      scheme,
+      reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
+    };
+  }
+  // Buffer.from with 'base64' is lenient and never throws.
+  if (Buffer.from(sig, 'base64').length === 65) scheme = 'bip137-legacy';
+  try {
+    // strict mode: the signature must match this exact address type.
+    const valid = Bip322Verifier.verifySignature(a, message, sig, true) === true;
+    return { valid, scheme };
+  } catch (e) {
+    return { valid: false, scheme, reason: 'unverifiable signature' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ownership-signature verification routed by address type — check 6 of the
+// ownership gate:
+//   P2PKH/P2SH (1.../3...) -> legacy bitcoinjs-message ("Bitcoin Signed Message")
+//   segwit (bc1...)         -> genuine BIP-322 verification
+// Returns { valid, scheme: 'legacy' | 'bip322' | 'bip137-legacy', reason? }.
+// ---------------------------------------------------------------------------
+export function verifyOwnershipSignature(addr, message, signature) {
+  const a = (addr || '').trim();
+  if (a[0] === '1' || a[0] === '3') {
+    const r = verifyOwnershipMessage(a, message, signature);
+    return { valid: r.valid, scheme: 'legacy', ...(r.reason ? { reason: r.reason } : {}) };
+  }
+  return verifyBip322Signature(a, message, signature);
+}
+
+// ---------------------------------------------------------------------------
 // Script / address helpers (mainnet only)
 // ---------------------------------------------------------------------------
 export function scriptTypeOfAddress(addr) {
@@ -478,6 +537,7 @@ export function createSignerRouter(deps) {
       challengeId,
       address: address.trim(),
       message,
+      nonce,
       expiresAt,
       used: false,
     });
@@ -485,34 +545,79 @@ export function createSignerRouter(deps) {
   });
 
   // --- POST /v1/btc/ownership/verify -------------------------------------
+  // The ownership gate: RED -> challenge -> wallet signs the exact challenge
+  // message -> this endpoint checks all six conditions -> GREEN.
+  //
+  //   1. address matches the challenge
+  //   2. exact message matches the challenge (byte-for-byte)
+  //   3. fresh nonce matches — the nonce is unique per challenge and embedded
+  //      in the message, so check 2 implies check 3; asserted explicitly below
+  //   4. challenge has not expired (getChallenge sweeps expired entries)
+  //   5. challenge/nonce has not already been used — single-use. The challenge
+  //      is burned once the binding checks (1-3) pass, before signature
+  //      verification, so each challenge allows exactly one signature
+  //      attempt. Binding failures do NOT burn, so a mistyped submission can
+  //      be retried with a fresh attempt.
+  //   6. signature validates for the address type (verifyOwnershipSignature):
+  //      legacy path for P2PKH/P2SH, genuine BIP-322 for segwit addresses.
+  //
+  // Without a challengeId the endpoint still verifies a bare signature
+  // (legacy behavior), but the response is marked gated:false — it is NOT a
+  // gated ownership proof.
   router.post('/v1/btc/ownership/verify', keyGuard, (req, res) => {
     const { address, message, signature, challengeId } = req.body || {};
     if (!isValidAddress(address) || typeof message !== 'string' || !message ||
         typeof signature !== 'string' || !signature) {
       return res.status(400).json({ valid: false, reason: 'body must include address, message, and signature' });
     }
+    if (message.length > 8192 || signature.length > 65536 || address.length > 128) {
+      return res.status(400).json({ valid: false, reason: 'input too long' });
+    }
     const addr = address.trim();
+    let gated = false;
     if (challengeId != null) {
       if (typeof challengeId !== 'string' || !challengeId) {
         return res.status(400).json({ valid: false, reason: 'challengeId must be a string' });
       }
       const c = getChallenge(ownershipChallenges, challengeId);
+      // 4. unknown or expired challenge
       if (!c) {
         return res.status(400).json({ valid: false, reason: 'unknown or expired challenge' });
       }
+      // 5. replay protection
       if (c.used) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'challenge already used (replay rejected)' });
       }
-      if (c.address !== addr || c.message !== message) {
+      // 1. address must match the challenge
+      if (c.address !== addr) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
-        return res.json({ valid: false, address: addr, challengeId, reason: 'message/address does not match the issued challenge' });
+        return res.json({ valid: false, address: addr, challengeId, reason: 'address does not match the issued challenge' });
       }
-      c.used = true; // single-use: replay protection
+      // 2. exact message must match the challenge
+      if (c.message !== message) {
+        logEvent('ownership.verify', { address: addr, valid: false, challengeId });
+        return res.json({ valid: false, address: addr, challengeId, reason: 'message does not match the issued challenge' });
+      }
+      // 3. fresh nonce must be present in the message
+      if (!message.includes(c.nonce)) {
+        logEvent('ownership.verify', { address: addr, valid: false, challengeId });
+        return res.json({ valid: false, address: addr, challengeId, reason: 'challenge nonce missing from message' });
+      }
+      c.used = true; // burn on first attempt: one challenge, one shot
+      gated = true;
     }
-    const r = verifyOwnershipMessage(addr, message, signature);
-    logEvent('ownership.verify', { address: addr, valid: r.valid, ...(challengeId ? { challengeId } : {}) });
-    return res.json({ valid: r.valid, address: addr, ...(r.reason ? { reason: r.reason } : {}), ...(challengeId ? { challengeId } : {}) });
+    // 6. signature / script validation, routed by address type
+    const r = verifyOwnershipSignature(addr, message, signature);
+    logEvent('ownership.verify', { address: addr, valid: r.valid, gated, scheme: r.scheme, ...(challengeId ? { challengeId } : {}) });
+    return res.json({
+      valid: r.valid,
+      address: addr,
+      scheme: r.scheme,
+      gated,
+      ...(r.reason ? { reason: r.reason } : {}),
+      ...(challengeId ? { challengeId } : {}),
+    });
   });
 
   // --- POST /v1/btc/psbt/prepare ------------------------------------------
@@ -573,18 +678,10 @@ export function createSignerRouter(deps) {
   });
 
   // --- POST /v1/btc/bip322/verify ------------------------------------------
-  // Genuine BIP-322 "simple" verification for segwit addresses (P2WPKH,
-  // P2SH-P2WPKH, single-key P2TR), via the bip322-js verifier: tagged message
-  // hash ("BIP0322-signed-message"), virtual toSpend/toSign reconstruction,
-  // and witness/script verification against the claimed address's
-  // scriptPubKey. Accepts the "smp"-prefixed form (BIP-322 v2.0.0) and the
-  // unprefixed backward-compat form. "ful"/"pof" (full/proof-of-funds) are
-  // explicitly rejected — the verifier library only implements "simple".
-  // P2WSH is NOT supported by the verifier library (degrades to valid:false,
-  // never a 500). A 65-byte decoded payload is a legacy BIP-137 compact
-  // signature, not a BIP-322 witness stack: it is verified down the BIP-137
-  // path in strict mode and reported with scheme "bip137-legacy".
-  // P2PKH (1...) addresses keep using the legacy /verify-ownership endpoint.
+  // Stateless BIP-322 verification for segwit addresses (P2WPKH,
+  // P2SH-P2WPKH, single-key P2TR). No challenge binding here — for the gated
+  // ownership proof, use POST /v1/btc/ownership/verify with a challengeId.
+  // Shares its crypto core with the gate via verifyBip322Signature.
   router.post('/v1/btc/bip322/verify', keyGuard, (req, res) => {
     const { address, message, signature } = req.body || {};
     if (!isValidAddress(address) || typeof message !== 'string' ||
@@ -595,44 +692,9 @@ export function createSignerRouter(deps) {
       return res.status(400).json({ valid: false, reason: 'input too long' });
     }
     const addr = address.trim();
-    if (addr[0] === '1') {
-      return res.json({
-        valid: false,
-        address: addr,
-        reason: 'P2PKH (1...) addresses use the legacy /verify-ownership endpoint; BIP-322 is for segwit addresses',
-      });
-    }
-    // BIP-322 v2.0.0 prefixes the base64 signature with the variant used.
-    // "smp" (simple) is routed to the verifier; "ful"/"pof" (full /
-    // proof-of-funds) are not implemented by the verifier library and are
-    // rejected with an explicit reason. No prefix = pre-finalization
-    // backward-compat form, assumed "simple".
-    let sig = signature.trim();
-    let scheme = 'bip322';
-    const prefix = sig.slice(0, 3);
-    if (prefix === 'smp') {
-      sig = sig.slice(3);
-    } else if (prefix === 'ful' || prefix === 'pof') {
-      return res.json({
-        valid: false,
-        address: addr,
-        scheme,
-        reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
-      });
-    }
-    // A 65-byte decoded payload is a legacy BIP-137 compact signature, not a
-    // BIP-322 witness stack. Label the scheme honestly instead of calling it
-    // BIP-322. (Buffer.from with 'base64' is lenient and never throws.)
-    if (Buffer.from(sig, 'base64').length === 65) scheme = 'bip137-legacy';
-    let valid = false;
-    try {
-      // strict mode: the signature must match this exact address type.
-      valid = Bip322Verifier.verifySignature(addr, message, sig, true) === true;
-    } catch (e) {
-      return res.json({ valid: false, address: addr, scheme, reason: 'unverifiable signature' });
-    }
-    logEvent('bip322.verify', { address: addr, valid });
-    return res.json({ valid, address: addr, scheme });
+    const r = verifyBip322Signature(addr, message, signature);
+    logEvent('bip322.verify', { address: addr, valid: r.valid });
+    return res.json({ valid: r.valid, address: addr, scheme: r.scheme, ...(r.reason ? { reason: r.reason } : {}) });
   });
 
   return router;
