@@ -30,7 +30,7 @@ the mempool.space base URL.
 |---|---|---|---|
 | GET | `/health` | — | `{ ok: true, service: 'bigkain-backend', network: 'bitcoin-mainnet', ownership_address, ownership_proof, private_keys_received: false }` |
 | POST | `/verify` | `{ address, message, signature }` | `{ valid, recovered_address }` — recovery-based verification (any address type); flips `ownership_proof` to `PROVEN` when the ownership address verifies |
-| POST | `/verify-ownership` | `{ address, message, signature }` | `{ valid, address }` — legacy signmessage verification, base58 addresses only (bc1… uses BIP-322: reported unsupported) |
+| POST | `/verify-ownership` | `{ address, message, signature }` | `{ valid, address }` — legacy signmessage verification, base58 addresses only (bc1… segwit addresses use `POST /v1/btc/bip322/verify`) |
 | GET | `/address/:address` | — | balance, funded/spent sats, tx counts (chain + mempool) |
 | GET | `/address/:address/utxos` | — | spendable outputs from mempool.space |
 | POST | `/attest` | `{ bitcoinWallet, conditions }` | 501 unless `INSUMER_API_KEY` is set |
@@ -41,6 +41,8 @@ the mempool.space base URL.
 | POST | `/v1/btc/psbt/prepare` | `{ walletAddress, destination, amountSats, feeRateSatVb }` | `{ psbt (base64, unsigned), inputs, outputs, feeSats, changeSats }` — selects confirmed UTXOs (smallest-first), RBF signaled, change back to the wallet, dust change folded into the fee |
 | POST | `/v1/btc/psbt/validate` | `{ psbt (base64), expected: { destination, amountSats, feeRateSatVb?, walletAddress } }` | `{ valid, verdict: 'SAFE_HOLD' \| 'REJECT', reasons[] }` — checks all inputs signed, inputs belong to `walletAddress`, exactly one output pays `destination`+`amountSats`, all other outputs are change to the wallet, fee within sane bounds, mainnet only |
 | POST | `/v1/btc/receipt` | `{ txid, ...meta }` | `{ recorded: true, txid }` — appends to an in-memory log and `receipts.jsonl` |
+| POST | `/v1/btc/bip322/verify` | `{ address, message, signature }` | `{ valid, address, scheme: 'bip322' }` — genuine BIP-322 verification for segwit addresses (P2WPKH, P2SH-P2WPKH, P2WSH, single-key P2TR), "simple" and "full" encodings; P2PKH (1…) is routed to `/verify-ownership` |
+| GET | `/events` | `?limit=N` (default 50, max 200) | `{ count, events: [{ ts, type, detail }] }` — newest first; audit log of verification/PSBT/receipt activity; never contains message text, signatures, or PSBTs |
 
 All `POST /v1/*` endpoints reject with 4xx (never stack traces) on bad input
 and refuse any key-like material. JSON bodies are limited to 100kb; helmet

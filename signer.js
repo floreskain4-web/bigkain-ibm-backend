@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Psbt, Transaction, networks, address } from 'bitcoinjs-lib';
 import bitcoreMessage from 'bitcoinjs-message';
+import { Verifier as Bip322Verifier } from 'bip322-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -357,6 +358,26 @@ function sanitizeMeta(meta) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit event ring buffer (in-memory, last 200 entries).
+// NEVER log message text, signatures, or PSBTs — addresses, amounts,
+// booleans, and truncated ids only.
+// ---------------------------------------------------------------------------
+const EVENTS_MAX = 200;
+const events = [];
+
+export function logEvent(type, detail) {
+  events.push({ ts: new Date().toISOString(), type, detail: detail || {} });
+  if (events.length > EVENTS_MAX) events.splice(0, events.length - EVENTS_MAX);
+}
+
+export function getEvents(limit) {
+  let n = Number.isFinite(limit) ? Math.floor(limit) : 50;
+  if (n <= 0) n = 50;
+  n = Math.min(n, EVENTS_MAX);
+  return events.slice(-n).reverse(); // newest first
+}
+
+// ---------------------------------------------------------------------------
 // Router factory. deps: { mempool(path), mempoolBase } — the server's
 // mempool.space helper.
 // ---------------------------------------------------------------------------
@@ -430,6 +451,7 @@ export function createSignerRouter(deps) {
       used: false,
     };
     signerChallenges.set(challenge.challengeId, challenge);
+    logEvent('signer.challenge', { sessionId: session.sessionId.slice(0, 20) + '…' });
     const { used, sessionId: sid, ...pub } = challenge;
     return res.json(pub);
   });
@@ -479,14 +501,17 @@ export function createSignerRouter(deps) {
         return res.status(400).json({ valid: false, reason: 'unknown or expired challenge' });
       }
       if (c.used) {
+        logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'challenge already used (replay rejected)' });
       }
       if (c.address !== addr || c.message !== message) {
+        logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'message/address does not match the issued challenge' });
       }
       c.used = true; // single-use: replay protection
     }
     const r = verifyOwnershipMessage(addr, message, signature);
+    logEvent('ownership.verify', { address: addr, valid: r.valid, ...(challengeId ? { challengeId } : {}) });
     return res.json({ valid: r.valid, address: addr, ...(r.reason ? { reason: r.reason } : {}), ...(challengeId ? { challengeId } : {}) });
   });
 
@@ -501,6 +526,7 @@ export function createSignerRouter(deps) {
         { walletAddress, destination, amountSats, feeRateSatVb },
         { getUtxos, getPrevout, getTxHex },
       );
+      logEvent('psbt.prepare', { walletAddress: walletAddress.trim(), amountSats, feeSats: built.feeSats });
       return res.json(built);
     } catch (e) {
       return res.status(e.status || 502).json({ error: e.message });
@@ -514,6 +540,7 @@ export function createSignerRouter(deps) {
       return res.status(400).json({ valid: false, verdict: 'REJECT', reasons: ['body must include psbt (base64) and expected'] });
     }
     const r = validatePsbt(psbt, expected);
+    logEvent('psbt.validate', { valid: r.valid, verdict: r.verdict });
     return res.json(r);
   });
 
@@ -529,15 +556,60 @@ export function createSignerRouter(deps) {
       meta: sanitizeMeta(meta),
     };
     receipts.push(rec);
+    logEvent('receipt', { txid: rec.txid });
     try {
       fs.appendFileSync(RECEIPT_LOG, JSON.stringify(rec) + '\n');
     } catch (e) { /* file log is best-effort */ }
     return res.json({ recorded: true, txid: rec.txid });
   });
 
+  // --- GET /events ---------------------------------------------------------
+  // Audit log: newest first. Query ?limit=N (default 50, max 200).
+  // Entries never contain message text, signatures, or PSBTs.
+  router.get('/events', (req, res) => {
+    const limit = parseInt(req.query.limit, 10);
+    const evts = getEvents(limit);
+    return res.json({ count: evts.length, events: evts });
+  });
+
+  // --- POST /v1/btc/bip322/verify ------------------------------------------
+  // Genuine BIP-322 verification for segwit addresses (P2WPKH, P2SH-P2WPKH,
+  // P2WSH, single-key P2TR), via the bip322-js verifier:
+  // tagged message hash ("BIP0322-signed-message"), virtual toSpend/toSign
+  // reconstruction, and witness/script verification against the claimed
+  // address's scriptPubKey. Accepts "simple" and "full" signature encodings.
+  // P2PKH (1...) addresses keep using the legacy /verify-ownership endpoint.
+  router.post('/v1/btc/bip322/verify', keyGuard, (req, res) => {
+    const { address, message, signature } = req.body || {};
+    if (!isValidAddress(address) || typeof message !== 'string' ||
+        typeof signature !== 'string' || !signature) {
+      return res.status(400).json({ valid: false, reason: 'body must include address, message (string, may be empty), and signature' });
+    }
+    if (message.length > 8192 || signature.length > 65536 || address.length > 128) {
+      return res.status(400).json({ valid: false, reason: 'input too long' });
+    }
+    const addr = address.trim();
+    if (addr[0] === '1') {
+      return res.json({
+        valid: false,
+        address: addr,
+        reason: 'P2PKH (1...) addresses use the legacy /verify-ownership endpoint; BIP-322 is for segwit addresses',
+      });
+    }
+    let valid = false;
+    try {
+      // strict mode: the signature must match this exact address type.
+      valid = Bip322Verifier.verifySignature(addr, message, signature.trim(), true) === true;
+    } catch (e) {
+      return res.json({ valid: false, address: addr, scheme: 'bip322', reason: 'unverifiable signature' });
+    }
+    logEvent('bip322.verify', { address: addr, valid });
+    return res.json({ valid, address: addr, scheme: 'bip322' });
+  });
+
   return router;
 }
 
 // Test hooks (in-memory stores; not exposed over HTTP)
-export const _stores = { sessions, signerChallenges, ownershipChallenges, receipts };
+export const _stores = { sessions, signerChallenges, ownershipChallenges, receipts, events };
 export const _ttls = { SESSION_TTL_MS, SIGNER_CHALLENGE_TTL_MS, OWNERSHIP_CHALLENGE_TTL_MS };
