@@ -7,6 +7,7 @@ on:
 jobs:
   deploy:
     name: Build & Deploy
+    if: ${{ secrets.IBMCLOUD_API_KEY != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
