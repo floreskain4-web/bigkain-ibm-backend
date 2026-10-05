@@ -31,11 +31,8 @@ jobs:
 
       - name: Authenticate with IBM Cloud
         if: steps.creds.outputs.available == 'true'
-        env:
-          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
-          IBM_REGION: ${{ secrets.IBM_REGION || 'us-south' }}
         run: |
-          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$IBM_REGION"
+          ibmcloud login --apikey "${{ secrets.IBMCLOUD_API_KEY  }}" -r "${{ secrets.IBM_REGION  || 'us-south' }}"
           ibmcloud cr login
 
       - name: Build and Push Container Image
