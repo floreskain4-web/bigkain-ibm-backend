@@ -1,0 +1,39 @@
+name: Deploy BigKain Backend to IBM Code Engine
+on:
+  push:
+    branches:
+      - main
+      - master
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      - name: Install IBM Cloud CLI
+        run: |
+          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+          ibmcloud plugin install code-engine -f
+          ibmcloud plugin install container-registry -f
+      - name: Authenticate with IBM Cloud
+        env:
+          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
+          IBM_REGION: ${{ secrets.IBM_REGION || 'us-south' }}
+        run: |
+          ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "$IBM_REGION"
+          ibmcloud cr login
+      - name: Build and Push Container Image
+        env:
+          IMAGE_NAME: icr.io/bigkain/bigkain-backend
+        run: |
+          COMMIT_TAG="${IMAGE_NAME}:${{ github.sha }}"
+          LATEST_TAG="${IMAGE_NAME}:latest"
+          docker build --platform linux/amd64 -t "$COMMIT_TAG" -t "$LATEST_TAG" .
+          docker push "$COMMIT_TAG"
+          docker push "$LATEST_TAG"
+      - name: Deploy Application to Code Engine
+        run: |
+          ibmcloud ce app update bigkain-backend \
+            --image icr.io/bigkain/bigkain-backend:latest \
+            --wait
