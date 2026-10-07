@@ -49,7 +49,7 @@ All `POST /v1/*` endpoints reject with 4xx (never stack traces) on bad input
 and refuse any key-like material. JSON bodies are limited to 100kb; helmet
 headers are on.
 
-`GET /v1/btc/market/etf-flow` is read-only and fetches Farside Investors' [Bitcoin ETF all-data table](https://farside.co.uk/bitcoin-etf-flow-all-data/). It uses the published `Total` column and the five latest rows with at least one reported fund value, excluding holidays or not-yet-reported rows. `dailyNetFlowUsdM` and `fiveSessionNetFlowUsdM` are USD millions; positive and negative session counts cover that same five-session window. `GREEN` requires positive five-session flow and more positive than negative sessions; `RED` requires negative flow and more negative than positive sessions; otherwise the result is `YELLOW`. It does not initiate or authorize wallet actions.
+`GET /v1/btc/market/etf-flow` is read-only and fetches Farside Investors' [Bitcoin ETF all-data table](https://farside.co.uk/bitcoin-etf-flow-all-data/) through Jina Reader because direct server-side requests receive a Cloudflare challenge. The response identifies Farside as the data source and Jina Reader as the retrieval intermediary. It uses the published `Total` column and the five latest rows with at least one reported fund value, excluding holidays or not-yet-reported rows. `dailyNetFlowUsdM` and `fiveSessionNetFlowUsdM` are USD millions; positive and negative session counts cover that same five-session window. `GREEN` requires positive five-session flow and more positive than negative sessions; `RED` requires negative flow and more negative than positive sessions; otherwise the result is `YELLOW`. It does not initiate or authorize wallet actions.
 
 ## Intended flow (WebView Backend Signer)
 

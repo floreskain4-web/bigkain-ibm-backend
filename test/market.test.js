@@ -4,6 +4,7 @@ import app from '../server.js';
 import {
   calculateFlowSignal,
   FARSIDE_BTC_ALL_DATA_URL,
+  FARSIDE_FETCH_URL,
   parseFarsideSessions,
   summarizeEtfFlows,
 } from '../market.js';
@@ -23,6 +24,18 @@ const FARSIDE_FIXTURE = `
   </tbody>
 </table>`;
 
+const FARSIDE_MARKDOWN_FIXTURE = `
+Title: Farside Investors
+URL Source: https://farside.co.uk/bitcoin-etf-flow-all-data/
+
+| Date | IBIT | FBTC | GBTC | Total |
+| --- | --- | --- | --- | --- |
+| 01 Oct 2026 | 195\\.6 | (60\\.7) | (31\\.4) | 102\\.7 |
+| 02 Oct 2026 | 158\\.2 | 29\\.3 | 0\\.0 | 189\\.9 |
+| 05 Oct 2026 | 69\\.9 | (74\\.5) | 0\\.0 | (89\\.8) |
+| 06 Oct 2026 | \\- | \\- | \\- | 0\\.0 |
+`;
+
 let server;
 let baseUrl;
 const nativeFetch = globalThis.fetch;
@@ -41,6 +54,13 @@ test('parser reads Farside totals, accounting negatives, and ignores unreported 
   const sessions = parseFarsideSessions(FARSIDE_FIXTURE);
   assert.equal(sessions.length, 6);
   assert.deepEqual(sessions[0], { date: '2026-09-28', netFlowUsdM: 31.0 });
+  assert.deepEqual(sessions.at(-1), { date: '2026-10-05', netFlowUsdM: -89.8 });
+});
+
+test('parser reads escaped Markdown tables returned by the page reader', () => {
+  const sessions = parseFarsideSessions(FARSIDE_MARKDOWN_FIXTURE);
+  assert.equal(sessions.length, 3);
+  assert.deepEqual(sessions[0], { date: '2026-10-01', netFlowUsdM: 102.7 });
   assert.deepEqual(sessions.at(-1), { date: '2026-10-05', netFlowUsdM: -89.8 });
 });
 
@@ -72,9 +92,9 @@ test('summary refuses to fabricate a five-session value from incomplete data', (
 
 test('GET /v1/btc/market/etf-flow returns live-shaped Farside summary data', async () => {
   globalThis.fetch = async (url, options) => {
-    assert.equal(url, FARSIDE_BTC_ALL_DATA_URL);
+    assert.equal(url, FARSIDE_FETCH_URL);
     assert.equal(options.method, 'GET');
-    assert.match(options.headers.Accept, /text\/html/);
+    assert.equal(options.headers.Accept, 'text/plain');
     return new Response(FARSIDE_FIXTURE, { status: 200, headers: { 'Content-Type': 'text/html' } });
   };
 
@@ -84,6 +104,8 @@ test('GET /v1/btc/market/etf-flow returns live-shaped Farside summary data', asy
     assert.match(response.headers.get('cache-control'), /max-age=60/);
     const body = await response.json();
     assert.equal(body.source, 'Farside Investors');
+    assert.equal(body.sourceUrl, FARSIDE_BTC_ALL_DATA_URL);
+    assert.equal(body.retrievedVia, 'Jina Reader');
     assert.equal(body.dailyNetFlowUsdM, -89.8);
     assert.equal(body.fiveSessionNetFlowUsdM, 120.3);
     assert.equal(body.positiveSessions, 3);

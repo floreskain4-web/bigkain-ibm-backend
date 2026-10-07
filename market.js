@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 export const FARSIDE_BTC_ALL_DATA_URL = 'https://farside.co.uk/bitcoin-etf-flow-all-data/';
+export const FARSIDE_FETCH_URL = 'https://r.jina.ai/https://farside.co.uk/bitcoin-etf-flow-all-data/';
 export const ETF_FLOW_PATH = '/v1/btc/market/etf-flow';
 const REQUIRED_SESSIONS = 5;
 const MONTHS = new Map([
@@ -62,18 +63,24 @@ function parseFlowValue(value) {
 }
 
 /**
- * Parse Farside's all-data HTML table into chronological reporting sessions.
+ * Parse Farside's all-data HTML or Markdown table into reporting sessions.
  * The published Total column is used as net flow; rows with no reported fund
  * values (for example, a market holiday or a not-yet-updated row) are skipped.
  */
-export function parseFarsideSessions(html) {
-  if (typeof html !== 'string') throw new TypeError('Farside response must be HTML text');
+export function parseFarsideSessions(document) {
+  if (typeof document !== 'string') throw new TypeError('Farside response must be text');
   const byDate = new Map();
-  const rows = html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi);
+  const htmlRows = [...document.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]
+    .map(([, rowHtml]) => [...rowHtml.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)]
+      .map(([, rawCell]) => cellText(rawCell)));
+  const markdownRows = htmlRows.length ? [] : document.split(/\r?\n/).flatMap((line) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) return [];
+    return [trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|')
+      .map((cell) => cell.trim().replace(/\\([^\w\s])/g, '$1'))];
+  });
 
-  for (const [, rowHtml] of rows) {
-    const cells = [...rowHtml.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)]
-      .map(([, rawCell]) => cellText(rawCell));
+  for (const cells of [...htmlRows, ...markdownRows]) {
     if (cells.length < 3) continue;
 
     const date = parseDate(cells[0]);
@@ -114,6 +121,7 @@ export function summarizeEtfFlows(sessions, fetchedAt = new Date().toISOString()
   return {
     source: 'Farside Investors',
     sourceUrl: FARSIDE_BTC_ALL_DATA_URL,
+    retrievedVia: 'Jina Reader',
     asOfDate: latest.date,
     fetchedAt,
     currency: 'USD',
@@ -133,10 +141,10 @@ export function createEtfFlowRouter({ fetchImpl = (url, options) => globalThis.f
 
   router.get(ETF_FLOW_PATH, async (_req, res) => {
     try {
-      const upstream = await fetchImpl(FARSIDE_BTC_ALL_DATA_URL, {
+      const upstream = await fetchImpl(FARSIDE_FETCH_URL, {
         method: 'GET',
         headers: {
-          Accept: 'text/html,application/xhtml+xml',
+          Accept: 'text/plain',
           'User-Agent': 'BigKain read-only ETF flow endpoint',
         },
         signal: AbortSignal.timeout(10_000),
