@@ -1,0 +1,120 @@
+openapi: 3.0.3
+info:
+  title: BigKain ChatGPT Wallet Interface
+  version: 1.0.0
+  description: >
+    Least-privilege authenticated interface for ChatGPT. ChatGPT can read
+    wallet data, request ownership challenges, prepare unsigned PSBTs,
+    validate signer-produced PSBTs, and inspect health/events. It cannot sign,
+    approve spending, or broadcast.
+servers:
+  - url: https://bigkain-ibm-backend.vercel.app
+security:
+  - BigKainChatGPT: []
+components:
+  securitySchemes:
+    BigKainChatGPT:
+      type: http
+      scheme: bearer
+paths:
+  /v1/chatgpt/status:
+    get:
+      summary: Read integration control-plane status
+      responses:
+        '200': {description: OK}
+        '401': {description: Missing authentication}
+        '403': {description: Invalid authentication}
+  /v1/chatgpt/address/{address}:
+    get:
+      summary: Read address balance
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Balance}
+  /v1/chatgpt/address/{address}/utxos:
+    get:
+      summary: Read UTXOs
+      parameters:
+        - in: path
+          name: address
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: UTXOs}
+  /v1/chatgpt/events:
+    get:
+      summary: Read audit events
+      responses:
+        '200': {description: Events}
+  /v1/chatgpt/ownership/challenge:
+    post:
+      summary: Issue a fresh cryptographic ownership challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: {type: string}
+      responses:
+        '200': {description: Challenge}
+        '503': {description: Disabled until durable shared challenge state is configured}
+  /v1/chatgpt/ownership/verify:
+    post:
+      summary: Verify a signer-produced ownership proof
+      description: >
+        The signature is produced by BigKain or an explicitly approved
+        external signer. ChatGPT never generates the signature.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, message, signature, challengeId]
+              properties:
+                address: {type: string}
+                message: {type: string}
+                signature: {type: string}
+                challengeId: {type: string}
+      responses:
+        '200': {description: Verification result}
+        '503': {description: Disabled until durable shared challenge state is configured}
+  /v1/chatgpt/transaction/prepare:
+    post:
+      summary: Prepare an unsigned transaction PSBT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [walletAddress, destination, amountSats, feeRateSatVb]
+              properties:
+                walletAddress: {type: string}
+                destination: {type: string}
+                amountSats: {type: integer, minimum: 1}
+                feeRateSatVb: {type: number, minimum: 1, maximum: 1000}
+      responses:
+        '200': {description: Unsigned PSBT}
+  /v1/chatgpt/transaction/validate:
+    post:
+      summary: Validate a user-signed PSBT
+      description: Validation only; cannot sign, approve, or broadcast.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [psbt, expected]
+              properties:
+                psbt: {type: string}
+                expected: {type: object}
+      responses:
+        '200': {description: SAFE_HOLD or REJECT}

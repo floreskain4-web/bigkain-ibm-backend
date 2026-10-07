@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { verifyMessage } from "./verify.js";
 import { createSignerRouter, verifyOwnershipMessage } from "./signer.js";
 import { createEtfFlowRouter } from "./market.js";
+import { chatgptAuth } from "./auth.js";
+import { createChatGptRouter } from "./chatgpt-router.js";
 
 const app = express();
 app.use(helmet());
@@ -79,6 +81,14 @@ async function mempool(path) {
   }
   return res.json();
 }
+
+// Authenticated, least-privilege ChatGPT Action facade. It can prepare unsigned
+// PSBTs only; signing and broadcasting remain outside this API.
+app.use("/v1/chatgpt", chatgptAuth, createChatGptRouter({
+  mempool,
+  mempoolBase: MEMPOOL_API,
+  network: "bitcoin-mainnet",
+}));
 
 // ---------------------------------------------------------------------------
 // POST /verify-ownership — { address, message, signature } -> { valid }

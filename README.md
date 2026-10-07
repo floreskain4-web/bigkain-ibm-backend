@@ -66,3 +66,11 @@ headers are on.
 - `market.js` — read-only Farside ETF flow retrieval, parsing, and signal calculation
 - `verify.js` — recovery-based Bitcoin message verifier (@noble/curves)
 - `test/*.test.js` — `npm test`, including ETF parser, signal, endpoint, and GET-only tests
+
+## ChatGPT Action integration
+
+The authenticated facade is defined by `openapi-chatgpt-bigkain.yaml` and serves under `/v1/chatgpt/*` on the existing Vercel alias `https://bigkain-ibm-backend.vercel.app`. Configure `BIGKAIN_CHATGPT_API_KEY` as an encrypted Vercel environment variable for each environment that should accept Action requests; never commit the value. Requests use `Authorization: Bearer <key>`.
+
+The facade can read balances, UTXOs, and workflow events; prepare **unsigned** PSBTs; and validate signer-produced PSBTs. It never accepts key material, signs, approves spending, or broadcasts. The existing `signer.js` and `verify.js` are unchanged.
+
+**Ownership-state safeguard:** This integration currently has only process-local challenge state. Ownership challenge and verification routes therefore return `503` by default and in all production/serverless deployments until a durable shared challenge store is implemented. The explicit ephemeral mode is limited to local non-production tests; deployed status reports ownership as `UNAVAILABLE`, never `GREEN`. The existing process-local event log is also instance-scoped and is not a durable audit store.
