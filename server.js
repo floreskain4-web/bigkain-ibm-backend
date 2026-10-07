@@ -20,6 +20,7 @@ import helmet from "helmet";
 import { fileURLToPath } from "node:url";
 import { verifyMessage } from "./verify.js";
 import { createSignerRouter, verifyOwnershipMessage } from "./signer.js";
+import { createEtfFlowRouter } from "./market.js";
 
 const app = express();
 app.use(helmet());
@@ -197,6 +198,7 @@ app.post("/attest", async (req, res) => {
 // WebView Backend Signer endpoints (/v1/...) — non-custodial policy layer.
 // The router gets the mempool.space helper for UTXO/tx lookups.
 app.use(createSignerRouter({ mempool, mempoolBase: MEMPOOL_API }));
+app.use(createEtfFlowRouter());
 
 app.use((req, res) => res.status(404).json({ error: "not found" }));
 
