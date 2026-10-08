@@ -23,6 +23,7 @@ import { createSignerRouter, verifyOwnershipMessage } from "./signer.js";
 import { createEtfFlowRouter } from "./market.js";
 import { chatgptAuth } from "./auth.js";
 import { createChatGptRouter } from "./chatgpt-router.js";
+import { createNeonOwnershipStore } from "./ownership-store.js";
 
 const app = express();
 app.use(helmet());
@@ -31,6 +32,9 @@ app.use(express.json({ limit: "100kb" }));
 const PORT = process.env.PORT || 8080;
 const MEMPOOL_API = process.env.MEMPOOL_API || "https://mempool.space/api";
 const INSUMER_API = "https://api.insumermodel.com/v1";
+const ownershipStore = process.env.BIGKAIN_OWNERSHIP_DATABASE_URL
+  ? createNeonOwnershipStore(process.env.BIGKAIN_OWNERSHIP_DATABASE_URL)
+  : null;
 
 const OWNERSHIP_ADDRESS =
   "1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP";
@@ -88,6 +92,7 @@ app.use("/v1/chatgpt", chatgptAuth, createChatGptRouter({
   mempool,
   mempoolBase: MEMPOOL_API,
   network: "bitcoin-mainnet",
+  ownershipStore,
 }));
 
 // ---------------------------------------------------------------------------

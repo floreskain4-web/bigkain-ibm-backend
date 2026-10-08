@@ -8,21 +8,9 @@ import {
   validatePsbt,
   verifyOwnershipSignature,
 } from './signer.js';
+import { createMemoryOwnershipStore, hashOwnershipMessage } from './ownership-store.js';
 
 const OWNERSHIP_TTL_MS = 10 * 60 * 1000;
-const ownershipChallenges = new Map();
-let lastOwnershipProof = {
-  status: 'RED',
-  address: null,
-  verified_at: null,
-};
-
-function sweep() {
-  const now = Date.now();
-  for (const [id, c] of ownershipChallenges) {
-    if (Date.parse(c.expiresAt) <= now) ownershipChallenges.delete(id);
-  }
-}
 
 function rejectKeyMaterial(req, res, next) {
   if (containsKeyMaterial(req.body)) {
@@ -45,19 +33,25 @@ function canUseLocalOwnershipChallenges() {
     && process.env.VERCEL !== '1';
 }
 
-function requireDurableOwnershipState(_req, res, next) {
-  if (!canUseLocalOwnershipChallenges()) {
-    return res.status(503).json({
-      valid: false,
-      gated: true,
-      reason: 'ownership proofs are disabled outside local non-production use until a durable shared challenge store is implemented',
-    });
-  }
-  next();
-}
-
-export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-mainnet' }) {
+export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-mainnet', ownershipStore = null }) {
   const router = Router();
+  const ephemeralOwnershipStore = createMemoryOwnershipStore();
+  const getOwnershipStore = () => {
+    if (ownershipStore?.durable === true) return ownershipStore;
+    return canUseLocalOwnershipChallenges() ? ephemeralOwnershipStore : null;
+  };
+  const requireOwnershipStore = (req, res, next) => {
+    const store = getOwnershipStore();
+    if (!store) {
+      return res.status(503).json({
+        valid: false,
+        gated: true,
+        reason: 'ownership proofs require a configured durable shared store; process-local mode is restricted to local non-production use',
+      });
+    }
+    req.ownershipStore = store;
+    next();
+  };
 
   async function getUtxos(addr) {
     const utxos = await mempool(`/address/${addr}/utxo`);
@@ -84,8 +78,28 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
 
   router.use(rejectKeyMaterial);
 
-  router.get('/status', (_req, res) => {
-    const ownershipStateAvailable = canUseLocalOwnershipChallenges();
+  router.get('/status', async (_req, res) => {
+    const store = getOwnershipStore();
+    let ownershipStateAvailable = Boolean(store);
+    let ownershipProof = store
+      ? { status: 'RED', address: null, verified_at: null }
+      : { status: 'UNAVAILABLE', reason: 'durable shared challenge state is not configured' };
+    if (store) {
+      try {
+        const latest = await store.getLatestVerifiedProof();
+        if (latest) {
+          ownershipProof = {
+            status: 'GREEN',
+            address: latest.address,
+            verified_at: latest.verifiedAt,
+          };
+        }
+      } catch {
+        ownershipStateAvailable = false;
+        ownershipProof = { status: 'UNAVAILABLE', reason: 'durable ownership storage is temporarily unavailable' };
+      }
+    }
+
     res.json({
       ok: true,
       integration: 'chatgpt',
@@ -106,7 +120,7 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
       ],
       chatgpt_unavailable: ownershipStateAvailable
         ? []
-        : ['ownership challenge and verification require durable shared state; process-local mode is restricted to local non-production use'],
+        : ['ownership challenge and verification require an available durable shared store; process-local mode is restricted to local non-production use'],
       chatgpt_cannot: [
         'receive seed phrases or private keys',
         'sign Bitcoin transactions',
@@ -114,9 +128,7 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
         'bypass BigKain user approval',
         'broadcast transactions',
       ],
-      ownership_proof: ownershipStateAvailable
-        ? lastOwnershipProof
-        : { status: 'UNAVAILABLE', reason: 'durable shared challenge state is not configured' },
+      ownership_proof: ownershipProof,
     });
   });
 
@@ -138,7 +150,7 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
           spentSats: info.mempool_stats?.spent_txo_sum || 0,
           txCount: info.mempool_stats?.tx_count || 0,
         },
-        ownership_proof: canUseLocalOwnershipChallenges()
+        ownership_proof: getOwnershipStore()
           ? 'RED unless a valid cryptographic challenge proof exists'
           : 'UNAVAILABLE until durable shared challenge state is configured',
       });
@@ -169,13 +181,12 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
     res.json({ count: events.length, events });
   });
 
-  router.post('/ownership/challenge', requireDurableOwnershipState, (req, res) => {
+  router.post('/ownership/challenge', requireOwnershipStore, async (req, res) => {
     const { address } = req.body || {};
     if (!isValidAddress(address)) {
       return res.status(400).json({ error: 'address must be a valid bitcoin address' });
     }
 
-    sweep();
     const addr = address.trim();
     const now = Date.now();
     const challengeId = 'bk_gpt_ch_' + randomBytes(16).toString('hex');
@@ -190,19 +201,26 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
       'Sign this message with the private key for the address above. Nothing moves; nothing broadcasts.',
     ].join('\n');
 
-    ownershipChallenges.set(challengeId, {
-      challengeId,
-      address: addr,
-      message,
-      nonce,
-      expiresAt,
-      used: false,
-    });
+    try {
+      await req.ownershipStore.pruneExpiredChallenges();
+      await req.ownershipStore.createChallenge({
+        challengeId,
+        address: addr,
+        messageHash: hashOwnershipMessage(message),
+        expiresAt,
+      });
+    } catch {
+      return res.status(503).json({
+        valid: false,
+        gated: true,
+        reason: 'durable ownership storage is temporarily unavailable',
+      });
+    }
 
     res.json({ challengeId, address: addr, message, expiresAt, gated: true });
   });
 
-  router.post('/ownership/verify', requireDurableOwnershipState, (req, res) => {
+  router.post('/ownership/verify', requireOwnershipStore, async (req, res) => {
     const { address, message, signature, challengeId } = req.body || {};
     try {
       requireJsonString(address, 'address');
@@ -217,15 +235,39 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
       return res.status(400).json({ valid: false, reason: 'invalid bitcoin address' });
     }
 
-    sweep();
-    const c = ownershipChallenges.get(challengeId);
+    let c;
+    try {
+      c = await req.ownershipStore.getChallenge(challengeId);
+    } catch {
+      return res.status(503).json({ valid: false, gated: true, reason: 'durable ownership storage is temporarily unavailable' });
+    }
     if (!c) return res.status(400).json({ valid: false, gated: true, reason: 'unknown or expired challenge' });
-    if (c.used) return res.json({ valid: false, gated: true, reason: 'challenge already used (replay rejected)' });
+    if (Date.parse(c.expiresAt) <= Date.now()) {
+      return res.status(400).json({ valid: false, gated: true, reason: 'unknown or expired challenge' });
+    }
+    if (c.consumedAt) return res.json({ valid: false, gated: true, reason: 'challenge already used (replay rejected)' });
     if (c.address !== address.trim()) return res.json({ valid: false, gated: true, reason: 'address does not match the issued challenge' });
-    if (c.message !== message) return res.json({ valid: false, gated: true, reason: 'message does not match the issued challenge' });
-    if (!message.includes(c.nonce)) return res.json({ valid: false, gated: true, reason: 'challenge nonce missing from message' });
+    if (c.messageHash !== hashOwnershipMessage(message)) return res.json({ valid: false, gated: true, reason: 'message does not match the issued challenge' });
 
-    c.used = true;
+    let consumed;
+    try {
+      consumed = await req.ownershipStore.consumeChallenge(challengeId);
+    } catch {
+      return res.status(503).json({ valid: false, gated: true, reason: 'durable ownership storage is temporarily unavailable' });
+    }
+    if (!consumed) {
+      let current;
+      try {
+        current = await req.ownershipStore.getChallenge(challengeId);
+      } catch {
+        return res.status(503).json({ valid: false, gated: true, reason: 'durable ownership storage is temporarily unavailable' });
+      }
+      if (current?.consumedAt) {
+        return res.json({ valid: false, gated: true, reason: 'challenge already used (replay rejected)' });
+      }
+      return res.status(400).json({ valid: false, gated: true, reason: 'unknown or expired challenge' });
+    }
+
     const result = verifyOwnershipSignature(address.trim(), message, signature);
     const response = {
       valid: result.valid,
@@ -237,11 +279,14 @@ export function createChatGptRouter({ mempool, mempoolBase, network = 'bitcoin-m
     };
 
     if (result.valid) {
-      lastOwnershipProof = {
-        status: 'GREEN',
-        address: address.trim(),
-        verified_at: new Date().toISOString(),
-      };
+      try {
+        const proof = await req.ownershipStore.markVerified(challengeId);
+        if (!proof) {
+          return res.status(503).json({ valid: false, gated: true, reason: 'verified ownership proof could not be durably recorded; request a new challenge' });
+        }
+      } catch {
+        return res.status(503).json({ valid: false, gated: true, reason: 'verified ownership proof could not be durably recorded; request a new challenge' });
+      }
     }
 
     res.json(response);

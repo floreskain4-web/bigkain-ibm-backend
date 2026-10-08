@@ -63,9 +63,11 @@ headers are on.
 
 - `server.js` — Express app (health, verify, ownership, address, attest), mounts signer and market routers
 - `signer.js` — sessions/challenges, PSBT build + validate, receipt log
+- `ownership-store.js` — Neon-backed durable ChatGPT ownership state and explicit local-only memory store
+- `migrations/001_ownership_challenges.sql` — ownership challenge/proof schema and least-privilege grants
 - `market.js` — read-only Farside ETF flow retrieval, parsing, and signal calculation
 - `verify.js` — recovery-based Bitcoin message verifier (@noble/curves)
-- `test/*.test.js` — `npm test`, including ETF parser, signal, endpoint, and GET-only tests
+- `test/*.test.js` — `npm test`, including ownership store, ETF parser, signal, endpoint, and GET-only tests
 
 ## ChatGPT Action integration
 
@@ -73,4 +75,8 @@ The authenticated facade is defined by `openapi-chatgpt-bigkain.yaml` and serves
 
 The facade can read balances, UTXOs, and workflow events; prepare **unsigned** PSBTs; and validate signer-produced PSBTs. It never accepts key material, signs, approves spending, or broadcasts. The existing `signer.js` and `verify.js` are unchanged.
 
-**Ownership-state safeguard:** This integration currently has only process-local challenge state. Ownership challenge and verification routes therefore return `503` by default and in all production/serverless deployments until a durable shared challenge store is implemented. The explicit ephemeral mode is limited to local non-production tests; deployed status reports ownership as `UNAVAILABLE`, never `GREEN`. The existing process-local event log is also instance-scoped and is not a durable audit store.
+**Durable ownership state:** Configure `BIGKAIN_OWNERSHIP_DATABASE_URL` as a sensitive Vercel environment variable only for environments being rolled out. Use a Neon runtime role limited to `public.bigkain_ownership_challenges`; apply `migrations/001_ownership_challenges.sql` with a schema owner before enabling the runtime role. The table stores the challenge ID, public Bitcoin address, SHA-256 digest of the exact challenge message, expiration/consumption timestamps, and a verified timestamp. It does not store the raw challenge message, signature, seed phrase, or private key.
+
+The 10-minute expiry is enforced using the database clock. Consumption is one atomic conditional `UPDATE ... WHERE consumed_at IS NULL AND expires_at > clock_timestamp() RETURNING ...`, so only one request across concurrent Vercel instances can claim a challenge. The exact address and message digest are checked before consumption; invalid signatures still consume a correctly bound challenge, preserving the existing single-attempt behavior. Successful proof timestamps remain durable; expired unverified rows are pruned when a new challenge is issued.
+
+Production and Preview fail closed when the durable database is missing or unavailable. The explicit ephemeral mode remains limited to local non-production use. The authenticated status endpoint reads the latest durable successful proof. The existing process-local event log is still instance-scoped and is not a durable audit store.

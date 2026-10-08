@@ -128,5 +128,7 @@ describe('authenticated ChatGPT facade', () => {
     assert.equal(r.body.gated, true);
     assert.ok(r.body.challengeId);
     assert.ok(r.body.message.includes('Nothing moves; nothing broadcasts.'));
+    const remainingMs = Date.parse(r.body.expiresAt) - Date.now();
+    assert.ok(remainingMs <= 10 * 60 * 1000 && remainingMs > 9 * 60 * 1000);
   });
 });
