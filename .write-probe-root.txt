@@ -1,0 +1,1 @@
+plain probe content with no template syntax
