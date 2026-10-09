@@ -4,12 +4,7 @@ on:
     branches:
       - main
       - master
- Actions: Read & write
- Contents: Read & write
- Workflows: Read & write
- Checks: Read & write
-Pull requests: Read & write 
-Metadata: Read-only
+  workflow_dispatch:
 jobs:
   deploy:
     name: Build & Deploy
@@ -58,6 +53,18 @@ jobs:
           ibmcloud ce app update bigkain-backend \
             --image icr.io/bigkain/bigkain-backend:latest \
             --wait
+
+      - name: Verify Code Engine health endpoint
+        if: steps.creds.outputs.available == 'true'
+        run: |
+          APP_URL="$(ibmcloud ce app get --name bigkain-backend --output url)"
+          APP_URL="${APP_URL%/}"
+          test -n "$APP_URL"
+          RESPONSE="$(curl --fail --silent --show-error \
+            --retry 8 --retry-delay 5 --retry-connrefused --max-time 20 \
+            "$APP_URL/health")"
+          printf 'GET %s/health\n%s\n' "$APP_URL" "$RESPONSE"
+          printf '%s' "$RESPONSE" | jq -e '.ok == true and .service == "bigkain-backend"'
 
       - name: Deploy skipped (no credentials)
         if: steps.creds.outputs.available != 'true'
