@@ -20,11 +20,30 @@ import helmet from "helmet";
 import { fileURLToPath } from "node:url";
 import { verifyMessage } from "./verify.js";
 import { createSignerRouter, verifyOwnershipMessage } from "./signer.js";
-import { createEtfFlowRouter } from "./market.js";
+import { createEtfFlowRouter, ETF_FLOW_PATH } from "./market.js";
 
 const app = express();
 app.use(helmet());
 app.use(express.json({ limit: "100kb" }));
+
+// Allow the public GitHub Pages status widget to read only public GET status data.
+const GITHUB_PAGES_ORIGIN = "https://floreskain4-web.github.io";
+const STATUS_ENDPOINTS = new Set(["/health", ETF_FLOW_PATH]);
+app.use((req, res, next) => {
+  if (!STATUS_ENDPOINTS.has(req.path) || !["GET", "OPTIONS"].includes(req.method) ||
+      req.get("Origin") !== GITHUB_PAGES_ORIGIN) {
+    return next();
+  }
+
+  res.set("Access-Control-Allow-Origin", GITHUB_PAGES_ORIGIN);
+  res.vary("Origin");
+  if (req.method === "OPTIONS") {
+    res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.set("Access-Control-Max-Age", "600");
+    return res.status(204).end();
+  }
+  return next();
+});
 
 const PORT = process.env.PORT || 8080;
 const MEMPOOL_API = process.env.MEMPOOL_API || "https://mempool.space/api";

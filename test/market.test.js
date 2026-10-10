@@ -99,8 +99,11 @@ test('GET /v1/btc/market/etf-flow returns live-shaped Farside summary data', asy
   };
 
   try {
-    const response = await nativeFetch(`${baseUrl}/v1/btc/market/etf-flow`);
+    const response = await nativeFetch(`${baseUrl}/v1/btc/market/etf-flow`, {
+      headers: { Origin: 'https://floreskain4-web.github.io' },
+    });
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get('access-control-allow-origin'), 'https://floreskain4-web.github.io');
     assert.match(response.headers.get('cache-control'), /max-age=60/);
     const body = await response.json();
     assert.equal(body.source, 'Farside Investors');
