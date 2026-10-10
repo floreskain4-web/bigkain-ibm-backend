@@ -4,10 +4,10 @@ on:
     branches:
       - main
       - master
- Actions: Read & write
- Contents: Read & write
- Workflows: Read & write
- Checks: Read & write
+  Read & write
+  Read & write
+  Read & write
+  Read & write
 Pull requests: Read & write 
 Metadata: Read-only
 jobs:
