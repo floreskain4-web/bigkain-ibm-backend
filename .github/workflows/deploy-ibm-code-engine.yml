@@ -34,8 +34,10 @@ jobs:
       - name: Build and Push Container Image
         env:
           IMAGE_NAME: icr.io/bigkain/bigkain-backend
+          COMMIT_SHA: ${{ github.sha}}
         run: |
-          COMMIT_TAG="${IMAGE_NAME}:{{ github.sha }}\n          LATEST_TAG="${IMAGE_NAME}:latest"
+          COMMIT_TAG="${IMAGE_NAME}:$COMMIT_SHA"
+          LATEST_TAG="${IMAGE_NAME}:latest"
           docker build --platform linux/amd64 -t "$COMMIT_TAG" -t "$LATEST_TAG" .
           docker push "$COMMIT_TAG"
           docker push "$LATEST_TAG"
