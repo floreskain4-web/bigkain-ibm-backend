@@ -25,17 +25,17 @@ jobs:
       - name: Authenticate with IBM Cloud
         env:
           IBM_REGION: ${{ secrets.IBM_REGION || 'us-south'}}
+          IBM_API_KEY: ${{ secrets.IBMCLOUD_API_KEY}}
         run: |
           REGION="${IBM_REGION:-us-south}"
-          ibmcloud login --apikey "${{ secrets.IBMCLOUD_API_KEY }}\ -r "$REGION"
+          ibmcloud login --apikey "$IBM_API_KEY" -r "$REGION"
           ibmcloud cr login
 
       - name: Build and Push Container Image
         env:
           IMAGE_NAME: icr.io/bigkain/bigkain-backend
         run: |
-          COMMIT_TAG="${IMAGE_NAME}:{github.sha}"
-          LATEST_TAG="${IMAGE_NAME}:latest"
+          COMMIT_TAG="${IMAGE_NAME}:{{ github.sha }}\n          LATEST_TAG="${IMAGE_NAME}:latest"
           docker build --platform linux/amd64 -t "$COMMIT_TAG" -t "$LATEST_TAG" .
           docker push "$COMMIT_TAG"
           docker push "$LATEST_TAG"
@@ -43,7 +43,7 @@ jobs:
       - name: Deploy Application to Code Engine
         run: |
           IMAGE="icr.io/bigkain/bigkain-backend:latest"
-          if ibmcloud ce app get --name bigkain-backend \>/dev/null 2>&1; then
+          if ibmcloud ce app get --name bigkain-backend >/dev/null 2>&1; then
             echo "App exists - updating."
             ibmcloud ce app update --name bigkain-backend \
               --image "$IMAGE" \
