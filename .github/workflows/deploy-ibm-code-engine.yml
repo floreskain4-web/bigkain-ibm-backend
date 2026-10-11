@@ -56,9 +56,18 @@ jobs:
       - name: Deploy Application to Code Engine
         if: steps.creds.outputs.available == 'true'
         run: |
-          ibmcloud ce app update bigkain-backend \
-            --image icr.io/bigkain/bigkain-backend:latest \
-            --wait
+          IMAGE="icr.io/bigkain/bigkain-backend:latest"
+          if ibmcloud ce app get --name bigkain-backend >/dev/null 2>&1; then
+            echo "App exists - updating."
+            ibmcloud ce app update --name bigkain-backend \
+              --image "$IMAGE" \
+              --wait
+          else
+            echo "App not found - creating."
+            ibmcloud ce app create --name bigkain-backend \
+              --image "$IMAGE" \
+              --wait
+          fi
 
       - name: Deploy skipped (no credentials)
         if: steps.creds.outputs.available != 'true'
