@@ -63,7 +63,7 @@ function parseFlowValue(value) {
 }
 
 /**
- * Parse Farside's all-data HTML or Markdown table into reporting sessions.
+ * Parse Farside's all-data HTML, Markdown, or flattened Jina text table.
  * The published Total column is used as net flow; rows with no reported fund
  * values (for example, a market holiday or a not-yet-updated row) are skipped.
  */
@@ -80,7 +80,24 @@ export function parseFarsideSessions(document) {
       .map((cell) => cell.trim().replace(/\\([^\w\s])/g, '$1'))];
   });
 
-  for (const cells of [...htmlRows, ...markdownRows]) {
+  const flattenedRows = [];
+  if (!htmlRows.length && !markdownRows.length) {
+    const lines = document.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const dateHeader = lines.findIndex((line) => line.toLowerCase() === 'date');
+    const totalHeader = lines.findIndex((line, index) => index > dateHeader && line.toLowerCase() === 'total');
+    if (dateHeader >= 0 && totalHeader > dateHeader + 1) {
+      const cellsPerRow = totalHeader - dateHeader;
+      for (let index = totalHeader + 1; index < lines.length; index += 1) {
+        if (!parseDate(lines[index])) continue;
+        const cells = lines.slice(index + 1, index + 1 + cellsPerRow);
+        if (cells.length !== cellsPerRow || cells.some((cell) => parseDate(cell))) continue;
+        flattenedRows.push([lines[index], ...cells]);
+        index += cellsPerRow;
+      }
+    }
+  }
+
+  for (const cells of [...htmlRows, ...markdownRows, ...flattenedRows]) {
     if (cells.length < 3) continue;
 
     const date = parseDate(cells[0]);

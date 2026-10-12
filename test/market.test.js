@@ -36,6 +36,19 @@ URL Source: https://farside.co.uk/bitcoin-etf-flow-all-data/
 | 06 Oct 2026 | \\- | \\- | \\- | 0\\.0 |
 `;
 
+const FARSIDE_FLATTENED_HEADERS = [
+  'Date', 'IBIT', 'FBTC', 'BITB', 'ARKB', 'BTCO', 'EZBC', 'BRRR', 'HODL',
+  'BTCW', 'MSBT', 'GBTC', 'BTC', 'Total',
+].join('\n\n');
+const FARSIDE_FLATTENED_ROWS = [
+  ['05 Oct 2026', '69.9', '(74.5)', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '(89.8)'],
+  ['06 Oct 2026', '122.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '0.0', '7.8', '0.0', '(11.0)', '118.8'],
+  ['07 Oct 2026', '(207.7)', '(105.1)', '(27.6)', '(101.7)', '0.0', '0.0', '0.0', '(3.5)', '0.0', '0.0', '(39.3)', '0.0', '(484.9)'],
+  ['08 Oct 2026', '(5.5)', '(197.1)', '(17.7)', '(20.3)', '0.0', '4.7', '0.0', '0.0', '0.0', '0.0', '(8.2)', '0.0', '(244.1)'],
+  ['09 Oct 2026', '22.4', '(3.6)', '0.0', '0.0', '0.0', '0.0', '0.0', '2.3', '0.0', '0.0', '0.0', '0.0', '21.1'],
+].map((cells) => cells.join('\n\n')).join('\n\n');
+const FARSIDE_FLATTENED_FIXTURE = `Title: Farside Investors\n\nMarkdown Content:\n${FARSIDE_FLATTENED_HEADERS}\n\n${FARSIDE_FLATTENED_ROWS}`;
+
 let server;
 let baseUrl;
 const nativeFetch = globalThis.fetch;
@@ -62,6 +75,18 @@ test('parser reads escaped Markdown tables returned by the page reader', () => {
   assert.equal(sessions.length, 3);
   assert.deepEqual(sessions[0], { date: '2026-10-01', netFlowUsdM: 102.7 });
   assert.deepEqual(sessions.at(-1), { date: '2026-10-05', netFlowUsdM: -89.8 });
+});
+
+test('parser reads Jina Reader flattened cells and the published Total column', () => {
+  const sessions = parseFarsideSessions(FARSIDE_FLATTENED_FIXTURE);
+  assert.equal(sessions.length, 5);
+  assert.deepEqual(sessions[0], { date: '2026-10-05', netFlowUsdM: -89.8 });
+  assert.deepEqual(sessions.at(-1), { date: '2026-10-09', netFlowUsdM: 21.1 });
+  const summary = summarizeEtfFlows(sessions, '2026-10-12T01:00:00.000Z');
+  assert.equal(summary.fiveSessionNetFlowUsdM, -678.9);
+  assert.equal(summary.positiveSessions, 2);
+  assert.equal(summary.negativeSessions, 3);
+  assert.equal(summary.signal, 'RED');
 });
 
 test('signal logic requires net-flow sign and matching session breadth', () => {
@@ -111,6 +136,21 @@ test('GET /v1/btc/market/etf-flow returns live-shaped Farside summary data', asy
     assert.equal(body.positiveSessions, 3);
     assert.equal(body.negativeSessions, 2);
     assert.equal(body.signal, 'GREEN');
+  } finally {
+    globalThis.fetch = nativeFetch;
+  }
+});
+
+test('GET /v1/btc/market/etf-flow accepts the flattened Jina source format', async () => {
+  globalThis.fetch = async () => new Response(FARSIDE_FLATTENED_FIXTURE, { status: 200 });
+  try {
+    const response = await nativeFetch(`${baseUrl}/v1/btc/market/etf-flow`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.asOfDate, '2026-10-09');
+    assert.equal(body.dailyNetFlowUsdM, 21.1);
+    assert.equal(body.fiveSessionNetFlowUsdM, -678.9);
+    assert.equal(body.signal, 'RED');
   } finally {
     globalThis.fetch = nativeFetch;
   }
