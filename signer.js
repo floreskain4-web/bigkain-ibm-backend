@@ -609,6 +609,9 @@ export function createSignerRouter(deps) {
     }
     // 6. signature / script validation, routed by address type
     const r = verifyOwnershipSignature(addr, message, signature);
+    if (gated && r.valid && typeof deps.onOwnershipProofVerified === 'function') {
+      deps.onOwnershipProofVerified(addr);
+    }
     logEvent('ownership.verify', { address: addr, valid: r.valid, gated, scheme: r.scheme, ...(challengeId ? { challengeId } : {}) });
     return res.json({
       valid: r.valid,

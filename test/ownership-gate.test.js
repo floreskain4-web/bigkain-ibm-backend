@@ -1,4 +1,4 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { payments } from 'bitcoinjs-lib';
@@ -21,6 +21,11 @@ async function post(p, body) {
   return { status: res.status, body: await res.json() };
 }
 
+async function health() {
+  const res = await fetch(`${base}/health`);
+  return res.json();
+}
+
 before(async () => {
   await new Promise((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -34,6 +39,8 @@ after(async () => {
 const priv = randomBytes(32);
 const pub = Buffer.from(ecc.pointFromScalar(priv, true));
 const P2PKH_ADDR = payments.p2pkh({ pubkey: pub }).address;
+app.locals.ownershipAddress = P2PKH_ADDR;
+app.locals.ownershipProof = { status: 'UNPROVEN', address: P2PKH_ADDR, verified_at: null };
 
 // --- BIP-322 spec's burned test key (published in the BIP; never real) ------
 const SPEC_WIF = 'L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k';
@@ -248,5 +255,129 @@ describe('ownership gate: key-material guard', () => {
     });
     assert.equal(status, 400);
     assert.match(body.error, /private keys/i);
+  });
+});
+
+describe('health ownership-proof state transition', () => {
+  beforeEach(() => {
+    app.locals.ownershipProof = { status: 'UNPROVEN', address: P2PKH_ADDR, verified_at: null };
+  });
+
+  test('legacy /verify cannot promote the configured address', async () => {
+    const message = 'legacy proof ' + Date.now();
+    const signature = bitcoreMessage.sign(message, priv, true).toString('base64');
+    const result = await post('/verify', { address: P2PKH_ADDR, message, signature });
+    assert.equal(result.body.valid, true);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('bare ownership verification is not a health proof', async () => {
+    const message = 'ungated proof ' + Date.now();
+    const signature = bitcoreMessage.sign(message, priv, true).toString('base64');
+    const result = await post('/v1/btc/ownership/verify', { address: P2PKH_ADDR, message, signature });
+    assert.equal(result.body.valid, true);
+    assert.equal(result.body.gated, false);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('successful exact challenge verification promotes the configured address', async () => {
+    const challenge = await post('/v1/btc/ownership/challenge', { address: P2PKH_ADDR });
+    const signature = bitcoreMessage.sign(challenge.body.message, priv, true).toString('base64');
+    const result = await post('/v1/btc/ownership/verify', {
+      address: P2PKH_ADDR,
+      message: challenge.body.message,
+      signature,
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(result.body.valid, true);
+    assert.equal(result.body.gated, true);
+    const status = await health();
+    assert.equal(status.ownership_proof, 'PROVEN');
+    assert.equal(status.ownership_address, P2PKH_ADDR);
+    assert.ok(Number.isFinite(Date.parse(app.locals.ownershipProof.verified_at)));
+  });
+
+  test('successful gated verification for a different address does not promote configured address', async () => {
+    const otherKey = randomBytes(32);
+    const otherAddress = payments.p2pkh({ pubkey: Buffer.from(ecc.pointFromScalar(otherKey, true)) }).address;
+    const challenge = await post('/v1/btc/ownership/challenge', { address: otherAddress });
+    const signature = bitcoreMessage.sign(challenge.body.message, otherKey, true).toString('base64');
+    const result = await post('/v1/btc/ownership/verify', {
+      address: otherAddress,
+      message: challenge.body.message,
+      signature,
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(result.body.valid, true);
+    assert.equal(result.body.gated, true);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('invalid signature does not promote the configured address', async () => {
+    const challenge = await post('/v1/btc/ownership/challenge', { address: P2PKH_ADDR });
+    const signature = bitcoreMessage.sign('not the issued message', priv, true).toString('base64');
+    const result = await post('/v1/btc/ownership/verify', {
+      address: P2PKH_ADDR,
+      message: challenge.body.message,
+      signature,
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(result.body.valid, false);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('expired challenge does not promote the configured address', async () => {
+    const challenge = await post('/v1/btc/ownership/challenge', { address: P2PKH_ADDR });
+    signer._stores.ownershipChallenges.get(challenge.body.challengeId).expiresAt =
+      new Date(Date.now() - 1000).toISOString();
+    const result = await post('/v1/btc/ownership/verify', {
+      address: P2PKH_ADDR,
+      message: challenge.body.message,
+      signature: 'c2ln',
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(result.status, 400);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('wrong message and wrong address do not promote the configured address', async () => {
+    const challenge = await post('/v1/btc/ownership/challenge', { address: P2PKH_ADDR });
+    const signature = bitcoreMessage.sign(challenge.body.message, priv, true).toString('base64');
+    const wrongMessage = await post('/v1/btc/ownership/verify', {
+      address: P2PKH_ADDR,
+      message: challenge.body.message + ' altered',
+      signature,
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(wrongMessage.body.valid, false);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+
+    const wrongAddress = await post('/v1/btc/ownership/verify', {
+      address: payments.p2pkh({ pubkey: Buffer.from(ecc.pointFromScalar(randomBytes(32), true)) }).address,
+      message: challenge.body.message,
+      signature,
+      challengeId: challenge.body.challengeId,
+    });
+    assert.equal(wrongAddress.body.valid, false);
+    assert.equal((await health()).ownership_proof, 'UNPROVEN');
+  });
+
+  test('replay is rejected and cannot alter the successful proof timestamp', async () => {
+    const challenge = await post('/v1/btc/ownership/challenge', { address: P2PKH_ADDR });
+    const signature = bitcoreMessage.sign(challenge.body.message, priv, true).toString('base64');
+    const request = {
+      address: P2PKH_ADDR,
+      message: challenge.body.message,
+      signature,
+      challengeId: challenge.body.challengeId,
+    };
+    const first = await post('/v1/btc/ownership/verify', request);
+    assert.equal(first.body.valid, true);
+    const verifiedAt = app.locals.ownershipProof.verified_at;
+    const replay = await post('/v1/btc/ownership/verify', request);
+    assert.equal(replay.body.valid, false);
+    assert.match(replay.body.reason, /replay rejected/i);
+    assert.equal((await health()).ownership_proof, 'PROVEN');
+    assert.equal(app.locals.ownershipProof.verified_at, verifiedAt);
   });
 });
