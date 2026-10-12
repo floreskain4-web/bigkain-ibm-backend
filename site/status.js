@@ -2,11 +2,12 @@
   'use strict';
 
   const API_BASE = 'https://bigkain-ibm-backend.vercel.app';
+  const page = document;
   const HEALTH_PATH = '/health';
-  const ETF_PATH = '/v1/btc/market/etf-flow';
+  const DASHBOARD_VERSION = page.querySelector('meta[name="dashboard-version"]')?.content || 'source';
+  const ETF_PATH = `/v1/btc/market/etf-flow?dashboard_build=${encodeURIComponent(DASHBOARD_VERSION)}`;
   const REQUEST_TIMEOUT_MS = 8000;
   const POLL_INTERVAL_MS = 60000;
-  const page = document;
   const refreshButton = page.getElementById('refresh-button');
   let refreshing = false;
 
