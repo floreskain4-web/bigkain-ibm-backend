@@ -2,6 +2,8 @@
 
 Non-custodial Bitcoin verification and policy service for BigKain.
 
+**Live dashboard:** [BigKain system status and ETF-flow dashboard](https://floreskain4-web.github.io/bigkain-ibm-backend/).
+
 **What it does:** proves address ownership via Bitcoin message signatures
 (two endpoints: recovery-based `/verify` and legacy `/verify-ownership`),
 reads balances/UTXOs from mempool.space, issues signing sessions and

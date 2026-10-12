@@ -3,6 +3,11 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'README.md'
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+      - '.github/workflows/deploy-ibm-code-engine.yml'
   workflow_dispatch:
 
 permissions:
