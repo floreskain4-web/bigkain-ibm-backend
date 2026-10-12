@@ -6,13 +6,13 @@
  *   - Reads address balances / UTXOs from mempool.space (read-only)
  *   - Optionally proxies signed holding attestations via the Insumer API
  *     (only when INSUMER_API_KEY is configured)
- *   - WebView Backend Signer: signing sessions, challenges, unsigned PSBT
- *     preparation and PSBT policy validation (see signer.js)
+ *   - WebView Backend Signer: sessions, ownership challenges, unsigned PSBT
+ *     preparation, and transaction-specific approval for a connected wallet
  *
  * What it NEVER does:
  *   - Hold private keys, seed phrases, or any signing material
- *   - Sign transactions or broadcast them (it builds UNSIGNED PSBTs only;
- *     there is deliberately no broadcast endpoint)
+ *   - Sign or broadcast transactions. The connected wallet signs and submits
+ *     locally after its own explicit confirmation.
  */
 
 import express from "express";
@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { verifyMessage } from "./verify.js";
 import { createSignerRouter, verifyOwnershipMessage } from "./signer.js";
 import { createEtfFlowRouter, ETF_FLOW_PATH } from "./market.js";
+import { createNeonTransactionStore } from "./transaction-store.js";
 
 const app = express();
 app.use(helmet());
@@ -28,6 +29,7 @@ app.use(express.json({ limit: "100kb" }));
 
 // Allow the public GitHub Pages status widget to read only public GET status data.
 const GITHUB_PAGES_ORIGIN = "https://floreskain4-web.github.io";
+const WALLET_ORIGIN = process.env.BIGKAIN_WALLET_ORIGIN || "https://bigkain-relativity-simulator.vercel.app";
 const STATUS_ENDPOINTS = new Set(["/health", ETF_FLOW_PATH]);
 app.use((req, res, next) => {
   if (!STATUS_ENDPOINTS.has(req.path) || !["GET", "OPTIONS"].includes(req.method) ||
@@ -45,9 +47,30 @@ app.use((req, res, next) => {
   return next();
 });
 
+// Allow only the BigKain app origin to call the wallet preparation/approval
+// API from a browser. This is CORS, not authentication; wallet signatures and
+// the connected wallet's own confirmation remain required.
+const WALLET_API_PATH = /^\/v1\/btc\/(ownership\/challenge|psbt\/(prepare|validate)|transaction\/approve)$/;
+app.use((req, res, next) => {
+  if (!WALLET_API_PATH.test(req.path) || !["POST", "OPTIONS"].includes(req.method) ||
+      req.get("Origin") !== WALLET_ORIGIN) {
+    return next();
+  }
+  res.set("Access-Control-Allow-Origin", WALLET_ORIGIN);
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+  res.set("Access-Control-Max-Age", "600");
+  res.vary("Origin");
+  if (req.method === "OPTIONS") return res.status(204).end();
+  return next();
+});
+
 const PORT = process.env.PORT || 8080;
 const MEMPOOL_API = process.env.MEMPOOL_API || "https://mempool.space/api";
 const INSUMER_API = "https://api.insumermodel.com/v1";
+const transactionStore = process.env.BIGKAIN_TRANSACTION_DATABASE_URL
+  ? createNeonTransactionStore(process.env.BIGKAIN_TRANSACTION_DATABASE_URL)
+  : null;
 
 const OWNERSHIP_ADDRESS =
   "1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP";
@@ -215,8 +238,11 @@ app.post("/attest", async (req, res) => {
 });
 
 // WebView Backend Signer endpoints (/v1/...) — non-custodial policy layer.
-// The router gets the mempool.space helper for UTXO/tx lookups.
-app.use(createSignerRouter({ mempool, mempoolBase: MEMPOOL_API }));
+app.use(createSignerRouter({
+  mempool,
+  mempoolBase: MEMPOOL_API,
+  transactionStore,
+}));
 app.use(createEtfFlowRouter());
 
 app.use((req, res) => res.status(404).json({ error: "not found" }));

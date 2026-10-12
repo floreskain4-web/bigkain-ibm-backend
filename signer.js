@@ -4,15 +4,16 @@
  * Non-custodial by construction:
  *   - The backend verifies signatures and enforces policy. It NEVER receives,
  *     stores, or logs seeds, mnemonics, xprvs, or private keys.
- *   - It builds UNSIGNED PSBTs only. It never signs and never broadcasts.
- *     There is deliberately NO broadcast endpoint.
+ *   - It builds unsigned PSBTs and verifies transaction-specific approval.
+ *     The connected wallet performs all signing and broadcasting.
  *
- * Sessions and challenges live in memory, expire quickly, and challenges are
- * single-use (replay protection).
+ * Ordinary sessions/ownership proofs live in memory and expire quickly.
+ * Transaction-specific challenges use a durable store when configured and
+ * are atomically single-use across server instances.
  */
 
 import { Router } from 'express';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,7 @@ const NETWORK = networks.bitcoin;
 const SESSION_TTL_MS = 10 * 60 * 1000;
 const SIGNER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const OWNERSHIP_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+const TRANSACTION_APPROVAL_TTL_MS = 5 * 60 * 1000;
 const DUST_SATS = 546;
 
 // Same loose address check as server.js: P2PKH (1...), P2SH (3...), bech32 (bc1q...), bech32m (bc1p...)
@@ -263,7 +265,7 @@ export async function buildUnsignedPsbt({ walletAddress, destination, amountSats
 // PSBT validator. Checks a (possibly signed) PSBT against expectations.
 // Returns { valid, verdict: 'SAFE_HOLD' | 'REJECT', reasons[] }.
 // ---------------------------------------------------------------------------
-export function validatePsbt(psbtBase64, expected) {
+export function validatePsbt(psbtBase64, expected, options = {}) {
   const reasons = [];
   let psbt;
   try {
@@ -281,13 +283,16 @@ export function validatePsbt(psbtBase64, expected) {
   const dest = destination.trim();
   const wallet = walletAddress.trim();
 
-  // 1. Every input must carry a signature (partial or finalized).
-  const unsigned = [];
-  psbt.data.inputs.forEach((inp, i) => {
-    const sigs = inp.partialSig || [];
-    if (!sigs.length && !inp.finalScriptSig && !inp.finalScriptWitness) unsigned.push(i);
-  });
-  if (unsigned.length) reasons.push(`unsigned inputs: ${unsigned.join(',')}`);
+  // 1. Existing validation requires signed inputs. Approval validates the
+  // unsigned transaction template before the wallet signs it.
+  if (options.requireSignatures !== false) {
+    const unsigned = [];
+    psbt.data.inputs.forEach((inp, i) => {
+      const sigs = inp.partialSig || [];
+      if (!sigs.length && !inp.finalScriptSig && !inp.finalScriptWitness) unsigned.push(i);
+    });
+    if (unsigned.length) reasons.push(`unsigned inputs: ${unsigned.join(',')}`);
+  }
 
   // 2. Every input must belong to the wallet address.
   let inputSum = 0;
@@ -300,6 +305,10 @@ export function validatePsbt(psbtBase64, expected) {
         value = Number(inp.witnessUtxo.value);
       } else if (inp.nonWitnessUtxo) {
         const prevTx = Transaction.fromHex(inp.nonWitnessUtxo.toString('hex'));
+        const expectedTxid = Buffer.from(psbt.txInputs[i].hash).reverse().toString('hex');
+        if (prevTx.getId() !== expectedTxid) {
+          reasons.push(`input ${i}: non-witness transaction id mismatch`);
+        }
         const idx = psbt.txInputs[i].index;
         const out = prevTx.outs[idx];
         script = out.script;
@@ -377,8 +386,50 @@ export function validatePsbt(psbtBase64, expected) {
   return { valid, verdict: valid ? 'SAFE_HOLD' : 'REJECT', reasons };
 }
 
+// Canonical commitment to the unsigned transaction skeleton. ScriptSig and
+// witness data are intentionally excluded so a later locally signed
+// transaction can be matched to the approved inputs, sequences and outputs.
+function transactionTemplateFromPsbt(psbt) {
+  return {
+    version: psbt.version,
+    locktime: psbt.locktime,
+    inputs: psbt.txInputs.map((input) => ({
+      txid: Buffer.from(input.hash).reverse().toString('hex'),
+      vout: input.index,
+      sequence: input.sequence == null ? 0xffffffff : input.sequence,
+    })),
+    outputs: psbt.txOutputs.map((output) => ({
+      scriptHex: Buffer.from(output.script).toString('hex'),
+      value: Number(output.value),
+    })),
+  };
+}
+
+function commitmentForTemplate(template) {
+  return createHash('sha256').update(JSON.stringify(template)).digest('hex');
+}
+
+function hashApprovalMessage(message) {
+  return createHash('sha256').update(message, 'utf8').digest('hex');
+}
+
+export function getPsbtTransactionCommitment(psbtBase64) {
+  if (typeof psbtBase64 !== 'string' || !psbtBase64) {
+    throw Object.assign(new Error('psbt must be a non-empty base64 string'), { status: 400 });
+  }
+  let psbt;
+  try {
+    psbt = Psbt.fromBase64(psbtBase64);
+  } catch {
+    throw Object.assign(new Error('invalid PSBT encoding'), { status: 400 });
+  }
+  return commitmentForTemplate(transactionTemplateFromPsbt(psbt));
+}
+
 // ---------------------------------------------------------------------------
-// In-memory stores (single process; Code Engine runs one instance per revision)
+// Ephemeral stores for ordinary sessions and non-transaction ownership proofs.
+// Transaction-specific approval challenges use deps.transactionStore, which
+// must be shared/durable in production serverless deployments.
 // ---------------------------------------------------------------------------
 const sessions = new Map();            // sessionId -> session
 const signerChallenges = new Map();    // challengeId -> challenge
@@ -437,11 +488,13 @@ export function getEvents(limit) {
 }
 
 // ---------------------------------------------------------------------------
-// Router factory. deps: { mempool(path), mempoolBase } — the server's
-// mempool.space helper.
+// Router factory. deps: { mempool(path), mempoolBase, transactionStore? }.
+// The wallet signs and broadcasts locally; the backend never handles keys or
+// relays payments.
 // ---------------------------------------------------------------------------
 export function createSignerRouter(deps) {
   const router = Router();
+  const transactionStore = deps.transactionStore || null;
 
   async function getUtxos(addr) {
     const utxos = await deps.mempool(`/address/${addr}/utxo`);
@@ -457,13 +510,60 @@ export function createSignerRouter(deps) {
     const tx = await deps.mempool(`/tx/${txid}`);
     const o = tx.vout && tx.vout[vout];
     if (!o) throw Object.assign(new Error('prevout not found'), { status: 502 });
-    return { scriptHex: o.scriptpubkey, value: o.value };
+    return { scriptHex: o.scriptpubkey, value: o.value, confirmed: !!(tx.status && tx.status.confirmed) };
   }
 
   async function getTxHex(txid) {
     const res = await fetch(`${deps.mempoolBase || 'https://mempool.space/api'}/tx/${txid}/hex`);
     if (!res.ok) throw Object.assign(new Error(`mempool.space responded ${res.status}`), { status: 502 });
     return (await res.text()).trim();
+  }
+
+  function psbtHasAnySignature(psbt) {
+    return psbt.data.inputs.some((input) =>
+      (input.partialSig || []).length > 0 ||
+      Boolean(input.tapKeySig) ||
+      (input.tapScriptSig || []).length > 0 ||
+      Boolean(input.finalScriptSig && input.finalScriptSig.length) ||
+      Boolean(input.finalScriptWitness && input.finalScriptWitness.length));
+  }
+
+  async function verifyApprovalPrevouts(psbt) {
+    let inputSum = 0;
+    for (let i = 0; i < psbt.txInputs.length; i += 1) {
+      const input = psbt.txInputs[i];
+      const txid = Buffer.from(input.hash).reverse().toString('hex');
+      const actual = await getPrevout(txid, input.index);
+      if (actual.confirmed !== true) {
+        throw Object.assign(new Error(`input ${i}: previous output is not confirmed`), { status: 400 });
+      }
+      const actualScript = actual.scriptHex.toLowerCase();
+      const candidates = [];
+      const psbtInput = psbt.data.inputs[i];
+      if (psbtInput.witnessUtxo) {
+        candidates.push({
+          scriptHex: Buffer.from(psbtInput.witnessUtxo.script).toString('hex').toLowerCase(),
+          value: Number(psbtInput.witnessUtxo.value),
+        });
+      }
+      if (psbtInput.nonWitnessUtxo) {
+        const prevTx = Transaction.fromBuffer(psbtInput.nonWitnessUtxo);
+        if (prevTx.getId() !== txid) {
+          throw Object.assign(new Error(`input ${i}: non-witness transaction id mismatch`), { status: 400 });
+        }
+        const prevout = prevTx.outs[input.index];
+        if (!prevout) {
+          throw Object.assign(new Error(`input ${i}: previous output not found`), { status: 400 });
+        }
+        candidates.push({ scriptHex: Buffer.from(prevout.script).toString('hex').toLowerCase(), value: Number(prevout.value) });
+      }
+      if (!candidates.length || candidates.some((candidate) =>
+        candidate.scriptHex !== actualScript || candidate.value !== Number(actual.value))) {
+        throw Object.assign(new Error(`input ${i}: PSBT UTXO data does not match the confirmed previous output`), { status: 400 });
+      }
+      inputSum += Number(actual.value);
+    }
+    return inputSum;
   }
 
   // --- POST /v1/signer/session -------------------------------------------
@@ -516,32 +616,105 @@ export function createSignerRouter(deps) {
   });
 
   // --- POST /v1/btc/ownership/challenge ----------------------------------
-  router.post('/v1/btc/ownership/challenge', keyGuard, (req, res) => {
-    const { address } = req.body || {};
+  router.post('/v1/btc/ownership/challenge', keyGuard, async (req, res) => {
+    const { address, psbt } = req.body || {};
     if (!isValidAddress(address)) {
       return res.status(400).json({ error: 'address must be a valid bitcoin address' });
     }
+    if (psbt !== undefined && !transactionStore) {
+      return res.status(503).json({ error: 'durable transaction approval storage is not configured' });
+    }
+    let transactionCommitment;
+    let transactionOutputLines = [];
+    let transactionFeeSats;
+    let transactionInputCount;
+    if (psbt !== undefined) {
+      if (typeof psbt !== 'string' || !psbt || psbt.length > 90000) {
+        return res.status(400).json({ error: 'psbt must be a non-empty base64 string (max 90000 chars)' });
+      }
+      try {
+        const parsed = Psbt.fromBase64(psbt);
+        if (psbtHasAnySignature(parsed)) {
+          return res.status(400).json({ error: 'approval challenge requires an unsigned PSBT' });
+        }
+        const template = transactionTemplateFromPsbt(parsed);
+        if (template.inputs.length < 1 || template.inputs.length > 100 ||
+            template.outputs.length < 1 || template.outputs.length > 128) {
+          return res.status(400).json({ error: 'approval challenges support 1-100 inputs and 1-128 outputs' });
+        }
+        transactionCommitment = commitmentForTemplate(template);
+        transactionInputCount = template.inputs.length;
+        const inputSum = await verifyApprovalPrevouts(parsed);
+        const outputSum = template.outputs.reduce((sum, output) => sum + output.value, 0);
+        transactionFeeSats = inputSum - outputSum;
+        if (!Number.isSafeInteger(transactionFeeSats) || transactionFeeSats <= 0) {
+          return res.status(400).json({ error: 'transaction fee must be a positive integer number of satoshis' });
+        }
+        transactionOutputLines = template.outputs.map((output, index) => {
+          const outputAddress = addressFromScript(Buffer.from(output.scriptHex, 'hex'));
+          const walletOutput = outputAddress === address.trim() ? ' (wallet/change)' : '';
+          return `Output ${index + 1}: ${outputAddress} — ${output.value} sats${walletOutput}`;
+        });
+      } catch (e) {
+        return res.status(e.status || 400).json({ error: e.status ? e.message : 'PSBT contains an output that cannot be shown as a mainnet address' });
+      }
+    }
     const now = Date.now();
-    const expiresAt = new Date(now + OWNERSHIP_CHALLENGE_TTL_MS).toISOString();
+    const ttl = transactionCommitment ? Math.min(OWNERSHIP_CHALLENGE_TTL_MS, TRANSACTION_APPROVAL_TTL_MS) : OWNERSHIP_CHALLENGE_TTL_MS;
+    const expiresAt = new Date(now + ttl).toISOString();
     const nonce = randomBytes(16).toString('hex');
     const message = [
-      'BIGKAIN OWNERSHIP PROOF',
+      transactionCommitment ? 'BIGKAIN TRANSACTION-SPECIFIC APPROVAL' : 'BIGKAIN OWNERSHIP PROOF',
       `Address: ${address.trim()}`,
       `Nonce: ${nonce}`,
       `Issued: ${new Date(now).toISOString()}`,
       `Expires: ${expiresAt}`,
-      'Sign this message with the private key for the address above. Nothing moves; nothing broadcasts.',
+      ...(transactionCommitment ? [
+        `Transaction commitment: ${transactionCommitment}`,
+        `Input count: ${transactionInputCount}`,
+        `Transaction fee: ${transactionFeeSats} sats`,
+        'Exact outputs:',
+        ...transactionOutputLines,
+        'By signing, I explicitly approve signing and submitting this exact transaction through my connected wallet after reviewing the destinations, amounts, and fee. This message does not itself spend bitcoin.',
+      ] : [
+        'Sign this message with the private key for the address above. Nothing moves; nothing broadcasts.',
+      ]),
     ].join('\n');
+    if (message.length > 8192) {
+      return res.status(400).json({ error: 'transaction approval message is too long to review safely' });
+    }
     const challengeId = 'bk_ch_' + randomBytes(16).toString('hex');
-    ownershipChallenges.set(challengeId, {
+    const challenge = {
       challengeId,
       address: address.trim(),
       message,
       nonce,
+      transactionCommitment: transactionCommitment || null,
       expiresAt,
       used: false,
+    };
+    if (transactionCommitment) {
+      try {
+        await transactionStore.createChallenge({
+          challengeId,
+          walletAddress: address.trim(),
+          messageHash: hashApprovalMessage(message),
+          transactionCommitment,
+          expiresAt,
+        });
+      } catch {
+        return res.status(503).json({ error: 'durable transaction approval storage is unavailable' });
+      }
+    } else {
+      ownershipChallenges.set(challengeId, challenge);
+    }
+    return res.json({
+      challengeId,
+      address: address.trim(),
+      message,
+      expiresAt,
+      ...(transactionCommitment ? { transactionCommitment } : {}),
     });
-    return res.json({ challengeId, address: address.trim(), message, expiresAt });
   });
 
   // --- POST /v1/btc/ownership/verify -------------------------------------
@@ -649,6 +822,132 @@ export function createSignerRouter(deps) {
     return res.json(r);
   });
 
+  // --- POST /v1/btc/transaction/approve -----------------------------------
+  // A fresh, transaction-bound ownership challenge must be signed by the
+  // wallet. The backend validates the approval but never signs or broadcasts.
+  router.post('/v1/btc/transaction/approve', keyGuard, async (req, res) => {
+    if (!transactionStore) {
+      return res.status(503).json({ error: 'durable transaction approval storage is not configured' });
+    }
+    const { psbt: psbtBase64, expected, challengeId, message, signature, explicitApproval } = req.body || {};
+    if (typeof psbtBase64 !== 'string' || !psbtBase64 || psbtBase64.length > 90000 ||
+        !expected || typeof expected !== 'object' || Array.isArray(expected) ||
+        typeof challengeId !== 'string' || !/^bk_ch_[0-9a-f]{32}$/.test(challengeId) ||
+        typeof message !== 'string' || !message || message.length > 8192 ||
+        typeof signature !== 'string' || !signature || signature.length > 65536) {
+      return res.status(400).json({ error: 'body must include psbt, expected, challengeId, message, and signature' });
+    }
+    if (!explicitApproval || typeof explicitApproval !== 'object' || Array.isArray(explicitApproval) ||
+        explicitApproval.approved !== true ||
+        typeof explicitApproval.transactionCommitment !== 'string' ||
+        !isValidAddress(expected.destination) || !isValidAddress(expected.walletAddress) ||
+        explicitApproval.destination !== expected.destination.trim() ||
+        explicitApproval.walletAddress !== expected.walletAddress.trim() ||
+        explicitApproval.amountSats !== expected.amountSats) {
+      return res.status(400).json({ error: 'explicitApproval must confirm approved:true, the exact commitment, wallet, destination, and amount' });
+    }
+
+    let psbt;
+    try {
+      psbt = Psbt.fromBase64(psbtBase64);
+    } catch {
+      return res.status(400).json({ error: 'invalid PSBT encoding' });
+    }
+    if (psbtHasAnySignature(psbt)) {
+      return res.status(400).json({ error: 'approval requires an unsigned PSBT; sign only after approval' });
+    }
+    const template = transactionTemplateFromPsbt(psbt);
+    if (template.inputs.length < 1 || template.inputs.length > 100 ||
+        template.outputs.length < 1 || template.outputs.length > 128) {
+      return res.status(400).json({ error: 'approval supports 1-100 inputs and 1-128 outputs' });
+    }
+    const transactionCommitment = commitmentForTemplate(template);
+    if (explicitApproval.transactionCommitment !== transactionCommitment) {
+      return res.status(400).json({ error: 'explicitApproval transactionCommitment does not match this PSBT' });
+    }
+
+    const policy = validatePsbt(psbtBase64, expected, { requireSignatures: false });
+    if (!policy.valid) {
+      logEvent('transaction.approve.rejected', { reason: 'policy' });
+      return res.status(422).json({ valid: false, verdict: 'REJECT', reasons: policy.reasons });
+    }
+
+    let challenge;
+    try {
+      challenge = await transactionStore.getChallenge(challengeId);
+    } catch {
+      return res.status(503).json({ error: 'durable transaction approval storage is unavailable' });
+    }
+    if (!challenge) return res.status(400).json({ error: 'ownership challenge not found' });
+    if (challenge.consumedAt) return res.status(409).json({ error: 'ownership challenge already used (replay rejected)' });
+    if (Date.parse(challenge.expiresAt) <= Date.now()) {
+      return res.status(400).json({ error: 'ownership challenge expired' });
+    }
+    if (challenge.walletAddress !== expected.walletAddress.trim() ||
+        challenge.transactionCommitment !== transactionCommitment ||
+        challenge.messageHash !== hashApprovalMessage(message)) {
+      return res.status(400).json({ error: 'fresh ownership challenge does not match this wallet and exact transaction' });
+    }
+
+    let inputSum;
+    try {
+      inputSum = await verifyApprovalPrevouts(psbt);
+    } catch (e) {
+      return res.status(e.status || 502).json({ error: e.message || 'could not verify transaction inputs' });
+    }
+
+    // The database's conditional UPDATE atomically burns this challenge across
+    // Vercel instances. A bad signature also consumes the challenge.
+    let consumed;
+    try {
+      consumed = await transactionStore.consumeChallenge(challengeId);
+    } catch {
+      return res.status(503).json({ error: 'durable transaction approval storage is unavailable' });
+    }
+    if (!consumed) {
+      return res.status(409).json({ error: 'ownership challenge expired or already used (replay rejected)' });
+    }
+
+    const proof = verifyOwnershipSignature(challenge.walletAddress, message, signature);
+    if (!proof.valid) {
+      logEvent('transaction.approve.rejected', { reason: 'ownership', scheme: proof.scheme });
+      return res.status(403).json({ error: 'fresh ownership proof is invalid', scheme: proof.scheme });
+    }
+
+    const now = Date.now();
+    const approvalId = 'bk_txapp_' + randomBytes(16).toString('hex');
+    let approval;
+    try {
+      approval = await transactionStore.markApproved(challengeId, approvalId);
+    } catch {
+      return res.status(503).json({ error: 'durable transaction approval storage is unavailable' });
+    }
+    if (!approval) {
+      return res.status(409).json({ error: 'ownership challenge was consumed before approval could be recorded' });
+    }
+    const outputSum = template.outputs.reduce((sum, output) => sum + output.value, 0);
+    const summary = {
+      transactionCommitment,
+      walletAddress: expected.walletAddress.trim(),
+      destination: expected.destination.trim(),
+      amountSats: expected.amountSats,
+      feeSats: inputSum - outputSum,
+      inputCount: template.inputs.length,
+      outputCount: template.outputs.length,
+    };
+
+    const expiresAt = challenge.expiresAt;
+    logEvent('transaction.approve', { approvalId, amountSats: summary.amountSats, destination: summary.destination });
+    return res.json({
+      approved: true,
+      approvalId,
+      approvedAt: approval.approvedAt || new Date(now).toISOString(),
+      expiresAt,
+      summary,
+      walletAction: 'Sign and submit the transaction with the connected wallet; the backend never signs or broadcasts.',
+    });
+  });
+
   // --- POST /v1/btc/receipt -------------------------------------------------
   router.post('/v1/btc/receipt', keyGuard, (req, res) => {
     const { txid, ...meta } = req.body || {};
@@ -702,4 +1001,4 @@ export function createSignerRouter(deps) {
 
 // Test hooks (in-memory stores; not exposed over HTTP)
 export const _stores = { sessions, signerChallenges, ownershipChallenges, receipts, events };
-export const _ttls = { SESSION_TTL_MS, SIGNER_CHALLENGE_TTL_MS, OWNERSHIP_CHALLENGE_TTL_MS };
+export const _ttls = { SESSION_TTL_MS, SIGNER_CHALLENGE_TTL_MS, OWNERSHIP_CHALLENGE_TTL_MS, TRANSACTION_APPROVAL_TTL_MS };

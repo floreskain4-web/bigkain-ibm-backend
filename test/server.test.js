@@ -62,6 +62,35 @@ describe('GET /health', () => {
   });
 });
 
+describe('wallet API CORS', () => {
+  const walletOrigin = 'https://bigkain-relativity-simulator.vercel.app';
+
+  test('allows the BigKain app to preflight wallet API POSTs without credentials', async () => {
+    const res = await fetch(`${base}/v1/btc/transaction/approve`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: walletOrigin,
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type',
+      },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(res.headers.get('access-control-allow-origin'), walletOrigin);
+    assert.equal(res.headers.get('access-control-allow-methods'), 'POST, OPTIONS');
+    assert.equal(res.headers.get('access-control-allow-headers'), 'Content-Type');
+    assert.equal(res.headers.get('access-control-allow-credentials'), null);
+  });
+
+  test('does not grant wallet API CORS to unrelated origins', async () => {
+    const res = await fetch(`${base}/v1/btc/transaction/approve`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://example.org', 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), null);
+  });
+});
+
 describe('POST /verify', () => {
   test('missing fields -> 400', async () => {
     const res = await fetch(`${base}/verify`, {
