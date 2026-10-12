@@ -30,7 +30,11 @@ jobs:
       - name: Package static dashboard
         env:
           RUNNER_TEMP: ${{ runner.temp }}
-        run: tar --dereference --hard-dereference --directory site -cf "$RUNNER_TEMP/artifact.tar" .
+        run: |
+          mkdir -p "$RUNNER_TEMP/site"
+          cp -R site/. "$RUNNER_TEMP/site/"
+          sed -i "s/__ASSET_VERSION__/${GITHUB_SHA}/g" "$RUNNER_TEMP/site/index.html"
+          tar --dereference --hard-dereference --directory "$RUNNER_TEMP/site" -cf "$RUNNER_TEMP/artifact.tar" .
       - name: Upload Pages artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
