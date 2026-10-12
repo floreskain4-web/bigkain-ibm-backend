@@ -149,6 +149,16 @@ describe('POST /v1/btc/bip322/verify (official BIP-322 vectors)', () => {
     assert.equal(r.body.scheme, 'bip137-legacy');
   });
 
+  test('smp prefix does not allow a compact BIP-137 signature to masquerade as BIP-322 simple', async () => {
+    const r = await post('/v1/btc/bip322/verify', {
+      address: VEC_ADDR, message: VEC_LEGACY_MSG, signature: 'smp' + VEC_LEGACY_SIG,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.valid, false);
+    assert.equal(r.body.scheme, 'bip322');
+    assert.match(r.body.reason, /simple witness/i);
+  });
+
   test('tampered message verifies false', async () => {
     const r = await post('/v1/btc/bip322/verify', { address: VEC_ADDR, message: 'Hello World!', signature: VEC_SIMPLE_SIG });
     assert.equal(r.status, 200);

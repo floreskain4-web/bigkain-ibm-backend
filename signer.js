@@ -84,10 +84,11 @@ export function verifyOwnershipMessage(address, message, signature) {
 // endpoint. Routes by signature prefix per BIP-322 v2.0.0: "smp" (simple) is
 // verified; "ful"/"pof" (full/proof-of-funds) are rejected — the verifier
 // library only implements "simple". No prefix = pre-finalization
-// backward-compat form, assumed simple. A 65-byte decoded payload is a
-// legacy BIP-137 compact signature, not a BIP-322 witness stack, and is
-// labeled honestly as bip137-legacy. P2WSH degrades to valid:false (library
-// limitation), never a 500. Returns { valid, scheme, reason? }.
+// backward-compat form, assumed simple. Unprefixed 65-byte payloads are
+// handled by the library's BIP-137 compatibility path and labeled honestly.
+// A prefixed "smp" payload must not be reinterpreted as BIP-137. P2WSH and
+// script-path P2TR are unsupported by the library and fail closed. Returns
+// { valid, scheme, reason? }.
 // ---------------------------------------------------------------------------
 export function verifyBip322Signature(addr, message, signature) {
   const a = (addr || '').trim();
@@ -101,6 +102,7 @@ export function verifyBip322Signature(addr, message, signature) {
   let sig = (signature || '').trim();
   let scheme = 'bip322';
   const prefix = sig.slice(0, 3);
+  const explicitlySimple = prefix === 'smp';
   if (prefix === 'smp') {
     sig = sig.slice(3);
   } else if (prefix === 'ful' || prefix === 'pof') {
@@ -110,8 +112,19 @@ export function verifyBip322Signature(addr, message, signature) {
       reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
     };
   }
-  // Buffer.from with 'base64' is lenient and never throws.
-  if (Buffer.from(sig, 'base64').length === 65) scheme = 'bip137-legacy';
+  // A 65-byte compact signature is BIP-137, not the witness-stack encoding
+  // required by an explicitly tagged BIP-322 simple signature. Without the
+  // prefix, retain the library's backwards-compatible BIP-137 verification.
+  if (Buffer.from(sig, 'base64').length === 65) {
+    if (explicitlySimple) {
+      return {
+        valid: false,
+        scheme,
+        reason: 'smp-prefixed signatures must contain a BIP-322 simple witness, not a compact signature',
+      };
+    }
+    scheme = 'bip137-legacy';
+  }
   try {
     // strict mode: the signature must match this exact address type.
     const valid = Bip322Verifier.verifySignature(a, message, sig, true) === true;
@@ -124,15 +137,25 @@ export function verifyBip322Signature(addr, message, signature) {
 // ---------------------------------------------------------------------------
 // Ownership-signature verification routed by address type — check 6 of the
 // ownership gate:
-//   P2PKH/P2SH (1.../3...) -> legacy bitcoinjs-message ("Bitcoin Signed Message")
-//   segwit (bc1...)         -> genuine BIP-322 verification
+//   P2PKH (1...)            -> legacy bitcoinjs-message ("Bitcoin Signed Message")
+//   P2SH-P2WPKH (3...)      -> BIP-322 simple / BIP-137, then legacy fallback
+//   native segwit (bc1...)  -> genuine BIP-322 verification
 // Returns { valid, scheme: 'legacy' | 'bip322' | 'bip137-legacy', reason? }.
 // ---------------------------------------------------------------------------
 export function verifyOwnershipSignature(addr, message, signature) {
   const a = (addr || '').trim();
-  if (a[0] === '1' || a[0] === '3') {
+  if (a[0] === '1') {
     const r = verifyOwnershipMessage(a, message, signature);
     return { valid: r.valid, scheme: 'legacy', ...(r.reason ? { reason: r.reason } : {}) };
+  }
+  if (a[0] === '3') {
+    const rawSignature = (signature || '').trim();
+    const prefix = rawSignature.slice(0, 3);
+    const bip322 = verifyBip322Signature(a, message, rawSignature);
+    if (bip322.valid || ['smp', 'ful', 'pof'].includes(prefix)) return bip322;
+    const legacy = verifyOwnershipMessage(a, message, rawSignature);
+    if (legacy.valid) return { valid: true, scheme: 'legacy' };
+    return bip322;
   }
   return verifyBip322Signature(a, message, signature);
 }
