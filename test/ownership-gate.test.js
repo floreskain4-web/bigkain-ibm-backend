@@ -38,6 +38,7 @@ const P2PKH_ADDR = payments.p2pkh({ pubkey: pub }).address;
 // --- BIP-322 spec's burned test key (published in the BIP; never real) ------
 const SPEC_WIF = 'L3VFeEujGtevx9w18HD1fhRbCH67Az2dpCymeRE1SoPK6XQtaN2k';
 const SPEC_ADDR = 'bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l';
+const SPEC_P2SH_P2WPKH_ADDR = '37qyp7jQAzqb2rCBpMvVtLDuuzKAUCVnJb';
 
 describe('ownership gate: challenge issuance', () => {
   test('issues a well-formed challenge', async () => {
@@ -186,6 +187,22 @@ describe('ownership gate: BIP-322 segwit path (all six checks)', () => {
     const sig = Bip322Signer.sign(SPEC_WIF, SPEC_ADDR, c.body.message);
     const v = await post('/v1/btc/ownership/verify', {
       address: SPEC_ADDR, message: c.body.message, signature: sig, challengeId: c.body.challengeId,
+    });
+    assert.equal(v.status, 200);
+    assert.equal(v.body.valid, true);
+    assert.equal(v.body.gated, true);
+    assert.equal(v.body.scheme, 'bip322');
+  });
+
+  test('nested SegWit P2SH challenge accepts an explicitly prefixed BIP-322 simple signature', async () => {
+    const c = await post('/v1/btc/ownership/challenge', { address: SPEC_P2SH_P2WPKH_ADDR });
+    assert.equal(c.status, 200);
+    const sig = 'smp' + Bip322Signer.sign(SPEC_WIF, SPEC_P2SH_P2WPKH_ADDR, c.body.message);
+    const v = await post('/v1/btc/ownership/verify', {
+      address: SPEC_P2SH_P2WPKH_ADDR,
+      message: c.body.message,
+      signature: sig,
+      challengeId: c.body.challengeId,
     });
     assert.equal(v.status, 200);
     assert.equal(v.body.valid, true);

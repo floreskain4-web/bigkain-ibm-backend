@@ -3,57 +3,61 @@ on:
   push:
     branches:
       - main
-      - master
+    paths-ignore:
+      - 'README.md'
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+      - '.github/workflows/deploy-ibm-code-engine.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Check IBM Cloud credentials
-        id: creds
-        run: |
-          if [ -z "${{ secrets.IBMCLOUD_API_KEY }}" ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "IBMCLOUD_API_KEY secret not set - deploy steps will be skipped."
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          fi
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install IBM Cloud CLI
-        if: steps.creds.outputs.available == 'true'
         run: |
           curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
           ibmcloud plugin install code-engine -f
           ibmcloud plugin install container-registry -f
 
       - name: Authenticate with IBM Cloud
-        if: steps.creds.outputs.available == 'true'
+        env:
+          IBM_REGION: ${{ secrets.IBM_REGION || 'us-south'}}
+          IBM_API_KEY: ${{ secrets.IBMCLOUD_API_KEY}}
         run: |
-          ibmcloud login --apikey "${{ secrets.IBMCLOUD_API_KEY  }}" -r "${{ secrets.IBM_REGION  || 'us-south' }}"
+          REGION="${IBM_REGION:-us-south}"
+          ibmcloud login --apikey "$IBM_API_KEY" -r "$REGION"
           ibmcloud cr login
 
       - name: Build and Push Container Image
-        if: steps.creds.outputs.available == 'true'
         env:
           IMAGE_NAME: icr.io/bigkain/bigkain-backend
+          COMMIT_SHA: ${{ github.sha}}
         run: |
-          COMMIT_TAG="${IMAGE_NAME}:${{ github.sha }}"
+          COMMIT_TAG="${IMAGE_NAME}:$COMMIT_SHA"
           LATEST_TAG="${IMAGE_NAME}:latest"
           docker build --platform linux/amd64 -t "$COMMIT_TAG" -t "$LATEST_TAG" .
           docker push "$COMMIT_TAG"
           docker push "$LATEST_TAG"
 
       - name: Deploy Application to Code Engine
-        if: steps.creds.outputs.available == 'true'
         run: |
-          ibmcloud ce app update bigkain-backend \
-            --image icr.io/bigkain/bigkain-backend:latest \
-            --wait
-
-      - name: Deploy skipped (no credentials)
-        if: steps.creds.outputs.available != 'true'
-        run: |
-          echo "Skipped: set the IBMCLOUD_API_KEY repo secret to enable IBM Code Engine deploys."
+          IMAGE="icr.io/bigkain/bigkain-backend:latest"
+          if ibmcloud ce app get --name bigkain-backend >/dev/null 2>&1; then
+            echo "App exists - updating."
+            ibmcloud ce app update --name bigkain-backend \
+              --image "$IMAGE" \
+              --wait
+          else
+            echo "App not found - creating."
+            ibmcloud ce app create --name bigkain-backend \
+              --image "$IMAGE" \
+              --wait
+          fi

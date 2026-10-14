@@ -29,6 +29,37 @@ describe('GET /health', () => {
     assert.equal(body.private_keys_received, false);
     assert.ok('ownership_proof' in body);
   });
+
+  test('allows read-only status access from the production GitHub Pages origin', async () => {
+    const res = await fetch(`${base}/health`, {
+      headers: { Origin: 'https://floreskain4-web.github.io' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://floreskain4-web.github.io');
+    assert.match(res.headers.get('vary') || '', /Origin/i);
+  });
+
+  test('answers status preflight without enabling credentials or writes', async () => {
+    const res = await fetch(`${base}/health`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://floreskain4-web.github.io',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    assert.equal(res.status, 204);
+    assert.equal(res.headers.get('access-control-allow-origin'), 'https://floreskain4-web.github.io');
+    assert.equal(res.headers.get('access-control-allow-methods'), 'GET, OPTIONS');
+    assert.equal(res.headers.get('access-control-allow-credentials'), null);
+  });
+
+  test('does not grant status access to unrelated browser origins', async () => {
+    const res = await fetch(`${base}/health`, {
+      headers: { Origin: 'https://example.org' },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('access-control-allow-origin'), null);
+  });
 });
 
 describe('POST /verify', () => {

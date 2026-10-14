@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090e1d">
+  <meta name="description" content="Read-only live status and Bitcoin spot ETF flow dashboard for BigKain.">
+  <title>BigKain — Bitcoin Systems Dashboard</title>
+  <meta name="dashboard-version" content="__ASSET_VERSION__">
+  <link rel="stylesheet" href="./dashboard.css?v=__ASSET_VERSION__">
+  <script src="./status.js?v=__ASSET_VERSION__" defer></script>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="BigKain dashboard home">
+        <span class="brand-mark" aria-hidden="true">₿</span>
+        <span class="brand-name">BIGKAIN<small>BITCOIN SYSTEMS</small></span>
+      </a>
+      <div class="topbar-actions">
+        <span class="network-chip"><span class="network-chip-dot" aria-hidden="true"></span>BITCOIN MAINNET</span>
+        <a class="text-link docs-link" href="https://github.com/floreskain4-web/bigkain-ibm-backend" target="_blank" rel="noopener noreferrer">API reference <span aria-hidden="true">↗</span></a>
+        <button class="refresh-button" id="refresh-button" type="button" aria-label="Refresh live dashboard data">
+          <span class="refresh-icon" aria-hidden="true">↻</span><span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-rule" aria-hidden="true"></span>PUBLIC SYSTEM DASHBOARD</p>
+          <h1 id="page-title">Bitcoin infrastructure,<br><em>in plain sight.</em></h1>
+          <p class="hero-description">A live, read-only view of BigKain API health, network mode, ownership-proof state and spot ETF flow data.</p>
+          <div class="hero-links">
+            <a href="#service-status">Service status <span aria-hidden="true">↓</span></a>
+            <span class="hero-link-divider" aria-hidden="true">/</span>
+            <a href="#market-flow">Market flows <span aria-hidden="true">↓</span></a>
+          </div>
+        </div>
+        <aside class="snapshot-card" aria-label="Overall dashboard status">
+          <div class="snapshot-topline"><span class="snapshot-label">SYSTEM SNAPSHOT</span><span class="live-indicator"><span aria-hidden="true"></span>LIVE</span></div>
+          <div class="snapshot-status" id="overall-badge" data-state="checking"><span class="status-light" aria-hidden="true"></span><span data-overall-label>Checking systems</span></div>
+          <p id="status-summary" role="status" aria-live="polite">Connecting to the public status endpoints…</p>
+          <div class="snapshot-divider"></div>
+          <div class="snapshot-foot"><span>LAST CHECKED</span><time id="checked-time" datetime="">—</time></div>
+        </aside>
+      </section>
+
+      <section class="dashboard-section" id="service-status" aria-labelledby="service-heading">
+        <div class="section-heading">
+          <div><p class="section-kicker">01 / SERVICE HEALTH</p><h2 id="service-heading">The system at a glance</h2></div>
+          <p class="section-note">Direct checks against public, read-only API endpoints.</p>
+        </div>
+        <div class="health-grid">
+          <article class="health-card" data-check="backend" data-state="checking">
+            <div class="health-card-top"><span class="card-label">BACKEND API</span><span class="check-state" data-value>Checking</span></div>
+            <div class="health-card-main"><span class="health-icon health-icon-api" aria-hidden="true">↗</span><h3 data-title>API health</h3></div>
+            <p data-detail>Waiting for the live health check.</p>
+            <a class="card-link" href="https://bigkain-ibm-backend.vercel.app/health" target="_blank" rel="noopener noreferrer">Open health endpoint <span aria-hidden="true">↗</span></a>
+          </article>
+          <article class="health-card" data-check="network" data-state="checking">
+            <div class="health-card-top"><span class="card-label">NETWORK MODE</span><span class="check-state" data-value>Checking</span></div>
+            <div class="health-card-main"><span class="health-icon health-icon-network" aria-hidden="true">⌁</span><h3 data-title>Bitcoin network</h3></div>
+            <p data-detail>Reading the network reported by the backend.</p>
+            <div class="card-footnote">Network mode is reported by <code>/health</code>.</div>
+          </article>
+          <article class="health-card" data-check="key-boundary" data-state="checking">
+            <div class="health-card-top"><span class="card-label">KEY BOUNDARY</span><span class="check-state" data-value>Checking</span></div>
+            <div class="health-card-main"><span class="health-icon health-icon-key" aria-hidden="true">⌑</span><h3 data-title>Private-key material</h3></div>
+            <p data-detail>Reading the backend’s public key-material status.</p>
+            <div class="card-footnote">This page never asks for a wallet or key.</div>
+          </article>
+          <article class="health-card" data-check="ownership" data-state="checking">
+            <div class="health-card-top"><span class="card-label">OWNERSHIP PROOF</span><span class="check-state" data-value>Checking</span></div>
+            <div class="health-card-main"><span class="health-icon health-icon-proof" aria-hidden="true">◎</span><h3 data-title>Public proof state</h3></div>
+            <p data-detail>Reading the proof state reported by the backend.</p>
+            <div class="card-footnote">Proof state is separate from API availability.</div>
+          </article>
+          <article class="health-card" data-check="etf" data-state="checking">
+            <div class="health-card-top"><span class="card-label">ETF DATA API</span><span class="check-state" data-value>Checking</span></div>
+            <div class="health-card-main"><span class="health-icon health-icon-etf" aria-hidden="true">↗</span><h3 data-title>Market data feed</h3></div>
+            <p data-detail>Checking the read-only ETF flow endpoint.</p>
+            <a class="card-link" href="https://bigkain-ibm-backend.vercel.app/v1/btc/market/etf-flow" target="_blank" rel="noopener noreferrer">Open flow endpoint <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+      </section>
+
+      <section class="market-panel" id="market-flow" aria-labelledby="market-heading">
+        <div class="market-header">
+          <div><p class="section-kicker">02 / MARKET DATA <span class="kicker-divider">·</span> BTC SPOT ETF</p><h2 id="market-heading">Flows, not forecasts.</h2><p class="market-intro">Recent U.S. spot Bitcoin ETF net flows, shown as reported by the source.</p></div>
+          <div class="signal-block"><span class="signal-caption">5-SESSION SIGNAL</span><span class="signal-badge signal-loading" id="flow-signal" data-signal>Loading</span></div>
+        </div>
+        <div class="flow-metrics" aria-live="polite">
+          <div class="flow-metric"><span class="metric-label">LATEST SESSION</span><strong id="daily-flow">—</strong><span class="metric-sub" id="daily-flow-date">Waiting for data</span></div>
+          <div class="flow-metric"><span class="metric-label">5-SESSION NET</span><strong id="five-session-flow">—</strong><span class="metric-sub">USD millions</span></div>
+          <div class="flow-metric"><span class="metric-label">SESSION BREADTH</span><strong id="session-breadth">—</strong><span class="metric-sub">positive / negative</span></div>
+        </div>
+        <div class="chart-heading"><span>RECENT SESSIONS</span><span class="chart-unit">Net flow · USD millions</span></div>
+        <div class="flow-chart" id="flow-chart" role="list" aria-label="Recent daily Bitcoin ETF net flows">
+          <p class="chart-empty">Latest reported sessions will appear here.</p>
+        </div>
+        <div class="market-footer">
+          <p id="market-detail">The flow signal describes market data only; it is not service health or investment advice.</p>
+          <div class="source-links"><span id="flow-as-of">As of —</span><a href="https://farside.co.uk/bitcoin-etf-flow-all-data/" target="_blank" rel="noopener noreferrer">Source: Farside Investors <span aria-hidden="true">↗</span></a><a href="https://bigkain-ibm-backend.vercel.app/v1/btc/market/etf-flow" target="_blank" rel="noopener noreferrer">JSON endpoint <span aria-hidden="true">↗</span></a></div>
+        </div>
+      </section>
+
+      <section class="trust-panel" aria-labelledby="trust-heading">
+        <div class="trust-mark" aria-hidden="true">₿</div>
+        <div class="trust-copy"><p class="section-kicker">THE KEY BOUNDARY</p><h2 id="trust-heading">Built to stay non-custodial.</h2><p>The dashboard requests only public health and market data. BigKain does not receive private keys or seed phrases, does not sign transactions, and has no broadcast endpoint. Any wallet signing in a future flow must happen locally, after explicit user approval.</p></div>
+        <div class="trust-tags" aria-label="Non-custodial safeguards"><span><i aria-hidden="true">✓</i> No key input</span><span><i aria-hidden="true">✓</i> No auto-signing</span><span><i aria-hidden="true">✓</i> No broadcasting</span></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <a class="footer-brand" href="./">BIGKAIN <span>·</span> SYSTEMS</a>
+      <p>Public read-only telemetry. Refreshes every 60 seconds.</p>
+      <a href="https://github.com/floreskain4-web/bigkain-ibm-backend" target="_blank" rel="noopener noreferrer">View source on GitHub <span aria-hidden="true">↗</span></a>
+    </footer>
+  </div>
+</body>
+</html>
