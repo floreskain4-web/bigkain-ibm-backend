@@ -56,15 +56,16 @@ const OWNERSHIP_ADDRESS =
 
 // Non-custodial: this backend never receives, stores, or handles private keys.
 // It only verifies signed messages against a claimed address.
-let lastProof = { status: "UNPROVEN", address: OWNERSHIP_ADDRESS, verified_at: null };
+app.locals.ownershipAddress = OWNERSHIP_ADDRESS;
+app.locals.ownershipProof = { status: "UNPROVEN", address: OWNERSHIP_ADDRESS, verified_at: null };
 
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "bigkain-backend",
     network: "bitcoin-mainnet",
-    ownership_address: OWNERSHIP_ADDRESS,
-    ownership_proof: lastProof.status,
+    ownership_address: app.locals.ownershipAddress,
+    ownership_proof: app.locals.ownershipProof.status,
     private_keys_received: false
   });
 });
@@ -78,9 +79,6 @@ app.post("/verify", (req, res) => {
     return res.status(400).json({ valid: false, reason: "input too long" });
   }
   const r = verifyMessage(address.trim(), message, signature.trim());
-  if (r.valid && address.trim() === OWNERSHIP_ADDRESS) {
-    lastProof = { status: "PROVEN", address: OWNERSHIP_ADDRESS, verified_at: new Date().toISOString() };
-  }
   res.json({ valid: r.valid, recovered_address: r.recoveredAddress, ...(r.reason ? { reason: r.reason } : {}) });
 });
 
@@ -226,7 +224,18 @@ app.post("/attest", async (req, res) => {
 
 // WebView Backend Signer endpoints (/v1/...) — non-custodial policy layer.
 // The router gets the mempool.space helper for UTXO/tx lookups.
-app.use(createSignerRouter({ mempool, mempoolBase: MEMPOOL_API }));
+app.use(createSignerRouter({
+  mempool,
+  mempoolBase: MEMPOOL_API,
+  onOwnershipProofVerified(address) {
+    if (address !== app.locals.ownershipAddress) return;
+    app.locals.ownershipProof = {
+      status: "PROVEN",
+      address: app.locals.ownershipAddress,
+      verified_at: new Date().toISOString(),
+    };
+  },
+}));
 app.use(createEtfFlowRouter());
 
 app.use((req, res) => res.status(404).json({ error: "not found" }));
