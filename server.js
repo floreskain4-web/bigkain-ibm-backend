@@ -53,8 +53,18 @@ const OWNERSHIP_ADDRESS =
   "1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP";
 
 // Non-custodial: this backend never receives, stores, or handles private keys.
-// It only verifies signed messages against a claimed address.
+// Ownership is PROVEN only after a gated challenge verification succeeds for
+// OWNERSHIP_ADDRESS. Legacy /verify and bare (ungated) signature checks must
+// never independently flip this state.
 let lastProof = { status: "UNPROVEN", address: OWNERSHIP_ADDRESS, verified_at: null };
+
+function markOwnershipProven() {
+  lastProof = {
+    status: "PROVEN",
+    address: OWNERSHIP_ADDRESS,
+    verified_at: new Date().toISOString(),
+  };
+}
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -75,10 +85,9 @@ app.post("/verify", (req, res) => {
   if (message.length > 8192 || signature.length > 256 || address.length > 128) {
     return res.status(400).json({ valid: false, reason: "input too long" });
   }
+  // Recovery-based verification only. Does NOT set ownership_proof — that
+  // requires a fresh challenge via POST /v1/btc/ownership/verify.
   const r = verifyMessage(address.trim(), message, signature.trim());
-  if (r.valid && address.trim() === OWNERSHIP_ADDRESS) {
-    lastProof = { status: "PROVEN", address: OWNERSHIP_ADDRESS, verified_at: new Date().toISOString() };
-  }
   res.json({ valid: r.valid, recovered_address: r.recoveredAddress, ...(r.reason ? { reason: r.reason } : {}) });
 });
 
@@ -215,8 +224,14 @@ app.post("/attest", async (req, res) => {
 });
 
 // WebView Backend Signer endpoints (/v1/...) — non-custodial policy layer.
-// The router gets the mempool.space helper for UTXO/tx lookups.
-app.use(createSignerRouter({ mempool, mempoolBase: MEMPOOL_API }));
+// The router gets the mempool.space helper for UTXO/tx lookups and a callback
+// so gated ownership success on OWNERSHIP_ADDRESS can set PROVEN.
+app.use(createSignerRouter({
+  mempool,
+  mempoolBase: MEMPOOL_API,
+  ownershipAddress: OWNERSHIP_ADDRESS,
+  onGatedOwnershipProven: markOwnershipProven,
+}));
 app.use(createEtfFlowRouter());
 
 app.use((req, res) => res.status(404).json({ error: "not found" }));
