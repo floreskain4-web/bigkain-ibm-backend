@@ -1,4 +1,4 @@
-name: Deploy BigKain Backend to IBM Code Engine
+ name: Deploy BigKain Backend to IBM Code Engine
 on:
   push:
     branches:
