@@ -79,7 +79,17 @@ export function verifyOwnershipMessage(address, message, signature) {
 }
 
 // ---------------------------------------------------------------------------
-// BIP-322 verification core
+// BIP-322 verification core, shared by the gated /v1/btc/ownership/verify
+// endpoint (segwit addresses) and the stateless /v1/btc/bip322/verify
+// endpoint. Routes by signature prefix per BIP-322 v2.0.0: "smp" (simple) is
+// verified; "ful"/"pof" (full/proof-of-funds) are rejected — the verifier
+// library only implements "simple". No prefix = pre-finalization
+// backward-compat form, assumed simple. Unprefixed 65-byte payloads are
+// handled by the library's BIP-137 compatibility path and labeled honestly.
+// A prefixed "smp" payload must not be reinterpreted as BIP-137. P2WSH and
+// script-path P2TR are unsupported by the library and fail closed. Returns
+// { valid, scheme, reason? }.
+// ---------------------------------------------------------------------------
 export function verifyBip322Signature(addr, message, signature) {
   const a = (addr || '').trim();
   if (a[0] === '1') {
@@ -102,6 +112,9 @@ export function verifyBip322Signature(addr, message, signature) {
       reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
     };
   }
+  // A 65-byte compact signature is BIP-137, not the witness-stack encoding
+  // required by an explicitly tagged BIP-322 simple signature. Without the
+  // prefix, retain the library's backwards-compatible BIP-137 verification.
   if (Buffer.from(sig, 'base64').length === 65) {
     if (explicitlySimple) {
       return {
@@ -113,6 +126,7 @@ export function verifyBip322Signature(addr, message, signature) {
     scheme = 'bip137-legacy';
   }
   try {
+    // strict mode: the signature must match this exact address type.
     const valid = Bip322Verifier.verifySignature(a, message, sig, true) === true;
     return { valid, scheme };
   } catch (e) {
@@ -120,6 +134,14 @@ export function verifyBip322Signature(addr, message, signature) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Ownership-signature verification routed by address type — check 6 of the
+// ownership gate:
+//   P2PKH (1...)            -> legacy bitcoinjs-message ("Bitcoin Signed Message")
+//   P2SH-P2WPKH (3...)      -> BIP-322 simple / BIP-137, then legacy fallback
+//   native segwit (bc1...)  -> genuine BIP-322 verification
+// Returns { valid, scheme: 'legacy' | 'bip322' | 'bip137-legacy', reason? }.
+// ---------------------------------------------------------------------------
 export function verifyOwnershipSignature(addr, message, signature) {
   const a = (addr || '').trim();
   if (a[0] === '1') {
@@ -138,6 +160,9 @@ export function verifyOwnershipSignature(addr, message, signature) {
   return verifyBip322Signature(a, message, signature);
 }
 
+// ---------------------------------------------------------------------------
+// Script / address helpers (mainnet only)
+// ---------------------------------------------------------------------------
 export function scriptTypeOfAddress(addr) {
   const a = addr.trim();
   if (a[0] === '1') return 'p2pkh';
@@ -151,6 +176,7 @@ export function scriptTypeOfAddress(addr) {
 }
 
 function addressFromScript(script) {
+  // Throws on non-mainnet or unknown scripts — callers treat that as invalid.
   return address.fromOutputScript(script, NETWORK);
 }
 
@@ -168,52 +194,67 @@ function isSegwitScriptType(t) {
   return t === 'p2wpkh' || t === 'p2wsh' || t === 'p2tr';
 }
 
+// ---------------------------------------------------------------------------
+// Unsigned PSBT builder. deps: { getUtxos(addr), getPrevout(txid, vout),
+// getTxHex(txid) }. Never touches key material.
+// ---------------------------------------------------------------------------
 export async function buildUnsignedPsbt({ walletAddress, destination, amountSats, feeRateSatVb }, deps) {
   const wallet = walletAddress.trim();
   const dest = destination.trim();
+
   if (!Number.isInteger(amountSats) || amountSats <= 0) {
     throw Object.assign(new Error('amountSats must be a positive integer'), { status: 400 });
   }
   if (typeof feeRateSatVb !== 'number' || !(feeRateSatVb >= 1) || feeRateSatVb > 1000) {
     throw Object.assign(new Error('feeRateSatVb must be a number between 1 and 1000'), { status: 400 });
   }
+
   const walletType = scriptTypeOfAddress(wallet);
   const destType = scriptTypeOfAddress(dest);
   if (!walletType || !destType) {
     throw Object.assign(new Error('unsupported address type'), { status: 400 });
   }
+
   const utxos = (await deps.getUtxos(wallet)).filter((u) => u.confirmed !== false);
   const sorted = utxos.slice().sort((a, b) => a.value - b.value);
+
+  // Smallest-first coin selection, re-estimating the fee as inputs grow.
   const selected = [];
   let total = 0;
   let fee = 0;
   for (const u of sorted) {
     selected.push(u);
     total += u.value;
-    const vsize = estimateVsize(selected.map(() => walletType), [destType, walletType]);
+    const vsize = estimateVsize(
+      selected.map(() => walletType),
+      [destType, walletType],
+    );
     fee = Math.ceil(vsize * feeRateSatVb);
     if (total >= amountSats + fee) break;
   }
   if (total < amountSats + fee) {
     throw Object.assign(new Error('insufficient confirmed funds'), { status: 400 });
   }
+
   let change = total - amountSats - fee;
   const outputs = [{ address: dest, sats: amountSats }];
   if (change >= DUST_SATS) {
     outputs.push({ address: wallet, sats: change, change: true });
   } else {
-    fee += change;
+    fee += change; // dust change is donated to the fee
     change = 0;
   }
+
   const psbt = new Psbt({ network: NETWORK });
   psbt.setVersion(2);
+
   const inputs = [];
   for (const u of selected) {
     const prevout = await deps.getPrevout(u.txid, u.vout);
     const input = {
       hash: Buffer.from(u.txid, 'hex').reverse(),
       index: u.vout,
-      sequence: 0xfffffffd,
+      sequence: 0xfffffffd, // RBF signaled
     };
     if (isSegwitScriptType(walletType)) {
       input.witnessUtxo = {
@@ -221,14 +262,17 @@ export async function buildUnsignedPsbt({ walletAddress, destination, amountSats
         value: prevout.value,
       };
     } else {
+      // Legacy (P2PKH/P2SH) inputs need the full previous transaction.
       input.nonWitnessUtxo = Buffer.from(await deps.getTxHex(u.txid), 'hex');
     }
     psbt.addInput(input);
     inputs.push({ txid: u.txid, vout: u.vout, value: u.value });
   }
+
   for (const o of outputs) {
     psbt.addOutput({ address: o.address, value: o.sats });
   }
+
   return {
     psbt: psbt.toBase64(),
     inputs,
@@ -238,6 +282,10 @@ export async function buildUnsignedPsbt({ walletAddress, destination, amountSats
   };
 }
 
+// ---------------------------------------------------------------------------
+// PSBT validator. Checks a (possibly signed) PSBT against expectations.
+// Returns { valid, verdict: 'SAFE_HOLD' | 'REJECT', reasons[] }.
+// ---------------------------------------------------------------------------
 export function validatePsbt(psbtBase64, expected) {
   const reasons = [];
   let psbt;
@@ -247,6 +295,7 @@ export function validatePsbt(psbtBase64, expected) {
   } catch (e) {
     return { valid: false, verdict: 'REJECT', reasons: ['invalid PSBT encoding'] };
   }
+
   const { destination, amountSats, walletAddress, feeRateSatVb } = expected || {};
   if (!isValidAddress(destination) || !isValidAddress(walletAddress) ||
       !Number.isInteger(amountSats) || amountSats <= 0) {
@@ -254,12 +303,16 @@ export function validatePsbt(psbtBase64, expected) {
   }
   const dest = destination.trim();
   const wallet = walletAddress.trim();
+
+  // 1. Every input must carry a signature (partial or finalized).
   const unsigned = [];
   psbt.data.inputs.forEach((inp, i) => {
     const sigs = inp.partialSig || [];
     if (!sigs.length && !inp.finalScriptSig && !inp.finalScriptWitness) unsigned.push(i);
   });
   if (unsigned.length) reasons.push(`unsigned inputs: ${unsigned.join(',')}`);
+
+  // 2. Every input must belong to the wallet address.
   let inputSum = 0;
   psbt.data.inputs.forEach((inp, i) => {
     try {
@@ -285,6 +338,9 @@ export function validatePsbt(psbtBase64, expected) {
       reasons.push(`input ${i}: cannot resolve (${e.message})`);
     }
   });
+
+  // 3. Outputs: exactly one payment of expected amount to destination;
+  //    every other output must be change back to the wallet. Mainnet only.
   let outputSum = 0;
   let destPaid = 0;
   psbt.txOutputs.forEach((o, i) => {
@@ -299,6 +355,7 @@ export function validatePsbt(psbtBase64, expected) {
     if (addr === dest && Number(o.value) === amountSats) {
       destPaid += 1;
     } else if (addr === wallet) {
+      // change — allowed
     } else {
       reasons.push(`output ${i}: unexpected payment of ${o.value} sats to ${addr}`);
     }
@@ -306,6 +363,8 @@ export function validatePsbt(psbtBase64, expected) {
   if (destPaid !== 1) {
     reasons.push(`expected destination ${dest} to receive exactly one output of ${amountSats} sats`);
   }
+
+  // 4. Fee sanity.
   const fee = inputSum - outputSum;
   if (fee < 0) {
     reasons.push('outputs exceed inputs (negative fee)');
@@ -336,14 +395,20 @@ export function validatePsbt(psbtBase64, expected) {
       reasons.push(`fee rate ${rate.toFixed(2)} sat/vB deviates from expected ${feeRateSatVb} sat/vB`);
     }
   }
+
   const valid = reasons.length === 0;
   return { valid, verdict: valid ? 'SAFE_HOLD' : 'REJECT', reasons };
 }
 
-const sessions = new Map();
-const signerChallenges = new Map();
-const ownershipChallenges = new Map();
-const receipts = [];
+// ---------------------------------------------------------------------------
+// In-memory stores (single process; Code Engine runs one instance per revision)
+// ---------------------------------------------------------------------------
+const sessions = new Map();            // sessionId -> session
+const signerChallenges = new Map();    // challengeId -> challenge
+const ownershipChallenges = new Map(); // challengeId -> { challengeId, address, message, expiresAt, used }
+const receipts = [];                   // in-memory receipt log
+// Merged layout: signer.js lives at the backend root, so the log sits beside it.
+// (Previously path.join(__dirname, '..', 'receipts.jsonl') when under src/.)
 const RECEIPT_LOG = path.join(__dirname, 'receipts.jsonl');
 
 function sweep(map) {
@@ -374,6 +439,11 @@ function sanitizeMeta(meta) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Audit event ring buffer (in-memory, last 200 entries).
+// NEVER log message text, signatures, or PSBTs — addresses, amounts,
+// booleans, and truncated ids only.
+// ---------------------------------------------------------------------------
 const EVENTS_MAX = 200;
 const events = [];
 
@@ -386,9 +456,13 @@ export function getEvents(limit) {
   let n = Number.isFinite(limit) ? Math.floor(limit) : 50;
   if (n <= 0) n = 50;
   n = Math.min(n, EVENTS_MAX);
-  return events.slice(-n).reverse();
+  return events.slice(-n).reverse(); // newest first
 }
 
+// ---------------------------------------------------------------------------
+// Router factory. deps: { mempool(path), mempoolBase } — the server's
+// mempool.space helper.
+// ---------------------------------------------------------------------------
 export function createSignerRouter(deps) {
   const router = Router();
 
@@ -415,6 +489,7 @@ export function createSignerRouter(deps) {
     return res.text();
   }
 
+  // --- POST /v1/signer/session --------------------------------------------
   router.post('/v1/signer/session', keyGuard, (req, res) => {
     const { walletAddress, purpose } = req.body || {};
     if (!isValidAddress(walletAddress) || typeof purpose !== 'string' || !purpose || purpose.length > 256) {
@@ -435,6 +510,7 @@ export function createSignerRouter(deps) {
     return res.json(session);
   });
 
+  // --- POST /v1/signer/challenge ------------------------------------------
   router.post('/v1/signer/challenge', keyGuard, (req, res) => {
     const { sessionId } = req.body || {};
     if (typeof sessionId !== 'string' || !sessionId) {
@@ -462,6 +538,7 @@ export function createSignerRouter(deps) {
     return res.json(pub);
   });
 
+  // --- POST /v1/btc/ownership/challenge ----------------------------------
   router.post('/v1/btc/ownership/challenge', keyGuard, (req, res) => {
     const { address } = req.body || {};
     if (!isValidAddress(address)) {
@@ -490,6 +567,7 @@ export function createSignerRouter(deps) {
     return res.json({ challengeId, address: address.trim(), message, expiresAt });
   });
 
+  // --- POST /v1/btc/ownership/verify -------------------------------------
   router.post('/v1/btc/ownership/verify', keyGuard, (req, res) => {
     const { address, message, signature, challengeId } = req.body || {};
     if (!isValidAddress(address) || typeof message !== 'string' || !message ||
@@ -530,9 +608,6 @@ export function createSignerRouter(deps) {
     }
     const r = verifyOwnershipSignature(addr, message, signature);
     logEvent('ownership.verify', { address: addr, valid: r.valid, gated, scheme: r.scheme, ...(challengeId ? { challengeId } : {}) });
-    if (r.valid && gated && deps.ownershipAddress && addr === deps.ownershipAddress && typeof deps.onGatedOwnershipProven === 'function') {
-      deps.onGatedOwnershipProven();
-    }
     return res.json({
       valid: r.valid,
       address: addr,
@@ -543,6 +618,7 @@ export function createSignerRouter(deps) {
     });
   });
 
+  // --- POST /v1/btc/psbt/prepare ------------------------------------------
   router.post('/v1/btc/psbt/prepare', keyGuard, async (req, res) => {
     const { walletAddress, destination, amountSats, feeRateSatVb } = req.body || {};
     if (!isValidAddress(walletAddress) || !isValidAddress(destination)) {
@@ -560,6 +636,7 @@ export function createSignerRouter(deps) {
     }
   });
 
+  // --- POST /v1/btc/psbt/validate ------------------------------------------
   router.post('/v1/btc/psbt/validate', keyGuard, (req, res) => {
     const { psbt, expected } = req.body || {};
     if (typeof psbt !== 'string' || !psbt || typeof expected !== 'object' || !expected) {
@@ -570,6 +647,7 @@ export function createSignerRouter(deps) {
     return res.json(result);
   });
 
+  // --- POST /v1/btc/receipt -----------------------------------------------
   router.post('/v1/btc/receipt', keyGuard, (req, res) => {
     const { txid, ...meta } = req.body || {};
     if (typeof txid !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txid)) {
@@ -579,11 +657,16 @@ export function createSignerRouter(deps) {
     receipts.push(entry);
     try {
       fs.appendFileSync(RECEIPT_LOG, JSON.stringify(entry) + '\n');
-    } catch (_) {}
+    } catch (_) { /* best-effort durable log */ }
     logEvent('receipt', { txid: entry.txid });
     return res.json({ recorded: true, txid: entry.txid });
   });
 
+  // --- POST /v1/btc/bip322/verify -----------------------------------------
+  // Stateless BIP-322 verification for segwit addresses (P2WPKH,
+  // P2SH-P2WPKH, single-key P2TR). No challenge binding here — for the gated
+  // ownership proof, use POST /v1/btc/ownership/verify with a challengeId.
+  // Shares its crypto core with the gate via verifyBip322Signature.
   router.post('/v1/btc/bip322/verify', keyGuard, (req, res) => {
     const { address, message, signature } = req.body || {};
     if (!isValidAddress(address) || typeof message !== 'string' ||
@@ -599,6 +682,7 @@ export function createSignerRouter(deps) {
     return res.json({ valid: r.valid, address: addr, scheme: r.scheme, ...(r.reason ? { reason: r.reason } : {}) });
   });
 
+  // --- GET /events --------------------------------------------------------
   router.get('/events', (req, res) => {
     const limit = req.query.limit != null ? Number(req.query.limit) : 50;
     const list = getEvents(limit);
@@ -608,5 +692,6 @@ export function createSignerRouter(deps) {
   return router;
 }
 
+// Test hooks (in-memory stores; not exposed over HTTP)
 export const _stores = { sessions, signerChallenges, ownershipChallenges, receipts, events };
 export const _ttls = { SESSION_TTL_MS, SIGNER_CHALLENGE_TTL_MS, OWNERSHIP_CHALLENGE_TTL_MS };
