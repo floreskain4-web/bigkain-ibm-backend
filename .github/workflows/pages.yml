@@ -2,7 +2,7 @@ name: Deploy BigKain Dashboard to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, Bigkain]
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'
@@ -31,6 +31,7 @@ jobs:
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/site"
           cp -R site/. "$RUNNER_TEMP/site/"
           sed -i "s/__ASSET_VERSION__/${GITHUB_SHA}/g" "$RUNNER_TEMP/site/index.html"

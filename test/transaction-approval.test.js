@@ -41,12 +41,12 @@ function makeApp({ store = createMemoryTransactionStore() } = {}) {
   return app;
 }
 
-function fixture() {
+function fixture(inputValue = 100000) {
   const prevTx = new Transaction();
   prevTx.addInput(Buffer.from(randomBytes(32)).reverse(), 1);
-  prevTx.addOutput(walletScript, 100000);
+  prevTx.addOutput(walletScript, inputValue);
   const prevTxid = prevTx.getId().toLowerCase();
-  prevouts.set(prevTxid, { scriptHex: walletScriptHex, value: 100000, confirmed: true });
+  prevouts.set(prevTxid, { scriptHex: walletScriptHex, value: inputValue, confirmed: true });
 
   const psbt = new Psbt();
   psbt.setVersion(2);
@@ -57,7 +57,7 @@ function fixture() {
     nonWitnessUtxo: prevTx.toBuffer(),
   });
   psbt.addOutput({ address: DESTINATION, value: 50000 });
-  psbt.addOutput({ address: walletAddress, value: 49000 });
+  psbt.addOutput({ address: walletAddress, value: inputValue - 51000 });
   return {
     psbtBase64: psbt.toBase64(),
     prevTxid,
@@ -236,6 +236,55 @@ describe('transaction-specific wallet approval', () => {
     const unconfirmed = await challengeFor(unconfirmedFixture);
     assert.equal(unconfirmed.status, 400);
     assert.match(unconfirmed.body.error, /not confirmed/);
+  });
+
+  test('rejects unsafe sighash modes at both challenge and approval stages', async () => {
+    for (const sighashType of [2, 3, 0x81, 0x82, 0x83]) {
+      const f = fixture();
+      const challenge = await challengeFor(f);
+      const unsafe = Psbt.fromBase64(f.psbtBase64);
+      unsafe.updateInput(0, { sighashType });
+      const bad = { ...f, psbtBase64: unsafe.toBase64() };
+      const issue = await challengeFor(bad);
+      assert.equal(issue.status, 400);
+      assert.match(issue.body.error, /SIGHASH/);
+      const result = await post(base, '/v1/btc/transaction/approve', approvalRequest(f, challenge, undefined, bad.psbtBase64));
+      assert.equal(result.status, 400);
+      assert.match(result.body.error, /SIGHASH/);
+      assert.equal((await transactionStore.getChallenge(challenge.body.challengeId)).consumedAt, null);
+    }
+  });
+
+  test('accepts explicit SIGHASH_ALL but binds even safe metadata changes to a fresh approval', async () => {
+    const f = fixture();
+    const challenge = await challengeFor(f);
+    const changed = Psbt.fromBase64(f.psbtBase64);
+    changed.updateInput(0, { sighashType: Transaction.SIGHASH_ALL });
+    const changedFixture = { ...f, psbtBase64: changed.toBase64() };
+    const mismatch = await post(base, '/v1/btc/transaction/approve', approvalRequest(f, challenge, undefined, changedFixture.psbtBase64));
+    assert.equal(mismatch.status, 400);
+    assert.match(mismatch.body.error, /does not match this PSBT/);
+    const fresh = await approve(changedFixture);
+    assert.equal(fresh.result.status, 200);
+  });
+
+  test('rejects script-based signing policies and fees above the absolute cap', async () => {
+    const f = fixture();
+    const scripted = Psbt.fromBase64(f.psbtBase64);
+    scripted.updateInput(0, { redeemScript: Buffer.from('51', 'hex') });
+    const complex = await challengeFor({ ...f, psbtBase64: scripted.toBase64() });
+    assert.equal(complex.status, 400);
+    assert.match(complex.body.error, /single-key/);
+
+    const large = fixture(300000);
+    const original = Psbt.fromBase64(large.psbtBase64);
+    const expensive = new Psbt();
+    expensive.addInput({ ...original.txInputs[0], nonWitnessUtxo: original.data.inputs[0].nonWitnessUtxo });
+    expensive.addOutput({ address: DESTINATION, value: 50000 });
+    expensive.addOutput({ address: walletAddress, value: 100000 });
+    const capped = await challengeFor({ ...large, psbtBase64: expensive.toBase64() });
+    assert.equal(capped.status, 400);
+    assert.match(capped.body.error, /1-100000 satoshis/);
   });
 
   test('fails closed when durable storage is unavailable and exposes no backend broadcast route', async () => {

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#090e1d">
-  <meta name="description" content="Read-only live status and Bitcoin spot ETF flow dashboard for BigKain.">
+  <meta name="description" content="Read-only BigKain status, Bitcoin ETF flows, and Rocket Companies Q2 2026 financial snapshot.">
   <title>BigKain — Bitcoin Systems Dashboard</title>
   <meta name="dashboard-version" content="__ASSET_VERSION__">
   <link rel="stylesheet" href="./dashboard.css?v=__ASSET_VERSION__">
@@ -31,11 +31,13 @@
         <div class="hero-copy">
           <p class="eyebrow"><span class="eyebrow-rule" aria-hidden="true"></span>PUBLIC SYSTEM DASHBOARD</p>
           <h1 id="page-title">Bitcoin infrastructure,<br><em>in plain sight.</em></h1>
-          <p class="hero-description">A live, read-only view of BigKain API health, network mode, ownership-proof state and spot ETF flow data.</p>
+          <p class="hero-description">A read-only view of BigKain API health, Bitcoin ETF flows, and a separate Rocket Companies quarterly financial snapshot.</p>
           <div class="hero-links">
             <a href="#service-status">Service status <span aria-hidden="true">↓</span></a>
             <span class="hero-link-divider" aria-hidden="true">/</span>
             <a href="#market-flow">Market flows <span aria-hidden="true">↓</span></a>
+            <span class="hero-link-divider" aria-hidden="true">/</span>
+            <a href="#company-financials">Company financials <span aria-hidden="true">↓</span></a>
           </div>
         </div>
         <aside class="snapshot-card" aria-label="Overall dashboard status">
@@ -106,6 +108,27 @@
         </div>
       </section>
 
+      <section class="market-panel financial-panel" id="company-financials" aria-labelledby="financial-heading">
+        <div class="market-header">
+          <div><p class="section-kicker">03 / COMPANY FINANCIALS <span class="kicker-divider">·</span> NYSE: RKT</p><h2 id="financial-heading">Rocket Companies · Q2 2026</h2><p class="market-intro">Quarter ended June 30, 2026 · Unaudited · Released August 6, 2026</p></div>
+          <span class="financial-snapshot-label">QUARTERLY SNAPSHOT</span>
+        </div>
+        <p class="financial-context">Rocket’s reported company results—not BigKain revenue, wallet balances, or Bitcoin market flows. This historical snapshot does not refresh with the live feeds.</p>
+        <div class="flow-metrics financial-metrics">
+          <div class="flow-metric"><span class="metric-label">Total revenue, net</span><strong>$2.784B</strong><span class="metric-sub">GAAP · USD</span></div>
+          <div class="flow-metric"><span class="metric-label">Adjusted revenue</span><strong>$2.761B</strong><span class="metric-sub">Non-GAAP · USD</span></div>
+          <div class="flow-metric"><span class="metric-label">Net income</span><strong>$229M</strong><span class="metric-sub">GAAP · USD</span></div>
+          <div class="flow-metric"><span class="metric-label">Adjusted net income</span><strong>$441M</strong><span class="metric-sub">Non-GAAP · USD</span></div>
+          <div class="flow-metric"><span class="metric-label">Adjusted EBITDA</span><strong>$766M</strong><span class="metric-sub">Non-GAAP · USD</span></div>
+          <div class="flow-metric"><span class="metric-label">Adjusted diluted EPS</span><strong>$0.16</strong><span class="metric-sub">Non-GAAP · USD per share</span></div>
+        </div>
+        <div class="financial-outlook"><div><span class="metric-label">Q3 2026 OUTLOOK · ADJUSTED REVENUE (NON-GAAP)</span><strong>$2.5B–$2.7B</strong></div><p>Company guidance from the earnings release, not an actual result or a forecast by BigKain.</p></div>
+        <div class="market-footer">
+          <p>Adjusted measures are company-defined non-GAAP measures, not substitutes for GAAP results. See the release for definitions and reconciliations. EPS is rounded to two decimals.</p>
+          <div class="source-links"><span>Figures: Investor-Supplement-Q2-2026.xlsx</span><a href="https://ir.rocketcompanies.com/news-and-events/press-releases/press-release-details/2026/Rocket-Companies-Announces-Second-Quarter-2026-Results/default.aspx" target="_blank" rel="noopener noreferrer">Official results &amp; reconciliations <span aria-hidden="true">↗</span></a><a href="./rocket-q2-2026.json">Snapshot data &amp; provenance <span aria-hidden="true">↗</span></a></div>
+        </div>
+      </section>
+
       <section class="trust-panel" aria-labelledby="trust-heading">
         <div class="trust-mark" aria-hidden="true">₿</div>
         <div class="trust-copy"><p class="section-kicker">THE KEY BOUNDARY</p><h2 id="trust-heading">Built to stay non-custodial.</h2><p>The dashboard requests only public health and market data. BigKain does not receive private keys or seed phrases, does not sign transactions, and has no broadcast endpoint. Any wallet signing in a future flow must happen locally, after explicit user approval.</p></div>
@@ -115,7 +138,7 @@
 
     <footer class="footer">
       <a class="footer-brand" href="./">BIGKAIN <span>·</span> SYSTEMS</a>
-      <p>Public read-only telemetry. Refreshes every 60 seconds.</p>
+      <p>Live telemetry refreshes every 60 seconds. Company financials are a dated snapshot.</p>
       <a href="https://github.com/floreskain4-web/bigkain-ibm-backend" target="_blank" rel="noopener noreferrer">View source on GitHub <span aria-hidden="true">↗</span></a>
     </footer>
   </div>

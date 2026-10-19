@@ -1,0 +1,37 @@
+{
+  "company": "Rocket Companies, Inc.",
+  "ticker": "NYSE: RKT",
+  "period": "Q2 2026",
+  "periodEnd": "2026-06-30",
+  "releaseDate": "2026-08-06",
+  "currency": "USD",
+  "metrics": {
+    "totalRevenueNet": 2784000000,
+    "adjustedRevenue": 2761000000,
+    "netIncome": 229000000,
+    "adjustedNetIncome": 441000000,
+    "adjustedEbitda": 766000000,
+    "adjustedDilutedEps": 0.16
+  },
+  "outlook": {
+    "period": "Q3 2026",
+    "measure": "Adjusted revenue",
+    "low": 2500000000,
+    "high": 2700000000,
+    "source": "Official earnings release; not the workbook"
+  },
+  "sources": {
+    "workbook": "Investor-Supplement-Q2-2026.xlsx",
+    "sha256": "a22eaa39460ad53c75e41409a6f757291fdeb6a82592075ff3269b9f315ce3fc",
+    "earningsRelease": "https://ir.rocketcompanies.com/news-and-events/press-releases/press-release-details/2026/Rocket-Companies-Announces-Second-Quarter-2026-Results/default.aspx"
+  },
+  "workbookCells": {
+    "totalRevenueNet": "4) Adjusted Revenue!D6",
+    "adjustedRevenue": "4) Adjusted Revenue!D8",
+    "netIncome": "6) Adjusted EBITDA!D6",
+    "adjustedNetIncome": "5) Adjusted Net Income (Loss)!D16",
+    "adjustedEbitda": "6) Adjusted EBITDA!D16",
+    "adjustedDilutedEps": "8) Adjusted Diluted EPS!D9 (rounded to two decimals)"
+  },
+  "nonGaapNote": "Adjusted measures are company-defined non-GAAP measures; see the official release for definitions and GAAP reconciliations."
+}

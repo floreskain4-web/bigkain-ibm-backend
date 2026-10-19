@@ -284,3 +284,23 @@ code { color: #d7deea; font-family: ui-monospace, SFMono-Regular, Menlo, Consola
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Historical company data stays distinct from live Bitcoin telemetry. */
+.financial-panel { margin-top: 30px; border-color: var(--line-strong); }
+.financial-snapshot-label { padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 999px; color: #bdc8d9; font-size: 9px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.financial-context { margin: 18px 0 0; max-width: 760px; color: var(--muted); font-size: 12px; }
+.financial-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 18px; }
+.financial-metrics .metric-label { text-transform: uppercase; }
+.financial-outlook { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: rgba(7,12,24,.33); }
+.financial-outlook strong { display: block; margin-top: 5px; color: #f7a43d; font-size: 26px; font-variant-numeric: tabular-nums; }
+.financial-outlook p { max-width: 360px; margin: 0; color: var(--muted); font-size: 11px; }
+@media (max-width: 680px) {
+  .hero-links { flex-wrap: wrap; }
+  .financial-panel .market-header { flex-direction: column; }
+  .financial-panel .market-intro { max-width: none; }
+  .financial-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .financial-metrics .flow-metric { padding: 14px; }
+  .financial-metrics .flow-metric strong { font-size: 25px; }
+  .financial-context { font-size: 11px; }
+  .financial-outlook { flex-direction: column; align-items: start; gap: 10px; }
+}

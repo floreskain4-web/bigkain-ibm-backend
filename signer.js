@@ -29,6 +29,7 @@ const SIGNER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const OWNERSHIP_CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const TRANSACTION_APPROVAL_TTL_MS = 5 * 60 * 1000;
 const DUST_SATS = 546;
+const MAX_APPROVAL_FEE_SATS = 100000;
 
 // Same loose address check as server.js: P2PKH (1...), P2SH (3...), bech32 (bc1q...), bech32m (bc1p...)
 const ADDR_RE = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/;
@@ -86,10 +87,11 @@ export function verifyOwnershipMessage(address, message, signature) {
 // endpoint. Routes by signature prefix per BIP-322 v2.0.0: "smp" (simple) is
 // verified; "ful"/"pof" (full/proof-of-funds) are rejected — the verifier
 // library only implements "simple". No prefix = pre-finalization
-// backward-compat form, assumed simple. A 65-byte decoded payload is a
-// legacy BIP-137 compact signature, not a BIP-322 witness stack, and is
-// labeled honestly as bip137-legacy. P2WSH degrades to valid:false (library
-// limitation), never a 500. Returns { valid, scheme, reason? }.
+// backward-compat form, assumed simple. Unprefixed 65-byte payloads are
+// handled by the library's BIP-137 compatibility path and labeled honestly.
+// A prefixed "smp" payload must not be reinterpreted as BIP-137. P2WSH and
+// script-path P2TR are unsupported by the library and fail closed. Returns
+// { valid, scheme, reason? }.
 // ---------------------------------------------------------------------------
 export function verifyBip322Signature(addr, message, signature) {
   const a = (addr || '').trim();
@@ -103,6 +105,7 @@ export function verifyBip322Signature(addr, message, signature) {
   let sig = (signature || '').trim();
   let scheme = 'bip322';
   const prefix = sig.slice(0, 3);
+  const explicitlySimple = prefix === 'smp';
   if (prefix === 'smp') {
     sig = sig.slice(3);
   } else if (prefix === 'ful' || prefix === 'pof') {
@@ -112,8 +115,19 @@ export function verifyBip322Signature(addr, message, signature) {
       reason: `'${prefix}' (full/proof-of-funds) signatures are not supported; simple ('smp') only`,
     };
   }
-  // Buffer.from with 'base64' is lenient and never throws.
-  if (Buffer.from(sig, 'base64').length === 65) scheme = 'bip137-legacy';
+  // A 65-byte compact signature is BIP-137, not the witness-stack encoding
+  // required by an explicitly tagged BIP-322 simple signature. Without the
+  // prefix, retain the library's backwards-compatible BIP-137 verification.
+  if (Buffer.from(sig, 'base64').length === 65) {
+    if (explicitlySimple) {
+      return {
+        valid: false,
+        scheme,
+        reason: 'smp-prefixed signatures must contain a BIP-322 simple witness, not a compact signature',
+      };
+    }
+    scheme = 'bip137-legacy';
+  }
   try {
     // strict mode: the signature must match this exact address type.
     const valid = Bip322Verifier.verifySignature(a, message, sig, true) === true;
@@ -126,15 +140,25 @@ export function verifyBip322Signature(addr, message, signature) {
 // ---------------------------------------------------------------------------
 // Ownership-signature verification routed by address type — check 6 of the
 // ownership gate:
-//   P2PKH/P2SH (1.../3...) -> legacy bitcoinjs-message ("Bitcoin Signed Message")
-//   segwit (bc1...)         -> genuine BIP-322 verification
+//   P2PKH (1...)            -> legacy bitcoinjs-message ("Bitcoin Signed Message")
+//   P2SH-P2WPKH (3...)      -> BIP-322 simple / BIP-137, then legacy fallback
+//   native segwit (bc1...)  -> genuine BIP-322 verification
 // Returns { valid, scheme: 'legacy' | 'bip322' | 'bip137-legacy', reason? }.
 // ---------------------------------------------------------------------------
 export function verifyOwnershipSignature(addr, message, signature) {
   const a = (addr || '').trim();
-  if (a[0] === '1' || a[0] === '3') {
+  if (a[0] === '1') {
     const r = verifyOwnershipMessage(a, message, signature);
     return { valid: r.valid, scheme: 'legacy', ...(r.reason ? { reason: r.reason } : {}) };
+  }
+  if (a[0] === '3') {
+    const rawSignature = (signature || '').trim();
+    const prefix = rawSignature.slice(0, 3);
+    const bip322 = verifyBip322Signature(a, message, rawSignature);
+    if (bip322.valid || ['smp', 'ful', 'pof'].includes(prefix)) return bip322;
+    const legacy = verifyOwnershipMessage(a, message, rawSignature);
+    if (legacy.valid) return { valid: true, scheme: 'legacy' };
+    return bip322;
   }
   return verifyBip322Signature(a, message, signature);
 }
@@ -386,11 +410,38 @@ export function validatePsbt(psbtBase64, expected, options = {}) {
   return { valid, verdict: valid ? 'SAFE_HOLD' : 'REJECT', reasons };
 }
 
-// Canonical commitment to the unsigned transaction skeleton. ScriptSig and
-// witness data are intentionally excluded so a later locally signed
-// transaction can be matched to the approved inputs, sequences and outputs.
+// Approval is deliberately limited to standard single-key spends. Complex
+// scripts need their own signing/size policy and are not safe to guess at.
+function assertApprovalSigningPolicy(psbt) {
+  psbt.data.inputs.forEach((input, index) => {
+    const prevTx = input.nonWitnessUtxo ? Transaction.fromBuffer(input.nonWitnessUtxo) : null;
+    const script = input.witnessUtxo?.script || prevTx?.outs[psbt.txInputs[index].index]?.script;
+    const hex = script ? Buffer.from(script).toString('hex') : '';
+    const isTaproot = /^5120[0-9a-f]{64}$/.test(hex);
+    const isP2pkh = /^76a914[0-9a-f]{40}88ac$/.test(hex);
+    const isP2wpkh = /^0014[0-9a-f]{40}$/.test(hex);
+    if ((!isTaproot && !isP2pkh && !isP2wpkh) || input.redeemScript ||
+        input.witnessScript || input.tapLeafScript?.length || input.tapMerkleRoot) {
+      throw Object.assign(new Error(`input ${index}: approval supports only single-key P2PKH, P2WPKH, and key-path P2TR`), { status: 400 });
+    }
+    const sighash = input.sighashType;
+    if (sighash != null && sighash !== Transaction.SIGHASH_ALL && !(isTaproot && sighash === 0)) {
+      throw Object.assign(new Error(`input ${index}: approval requires SIGHASH_ALL or Taproot SIGHASH_DEFAULT`), { status: 400 });
+    }
+  });
+}
+
+function assertApprovalFee(fee) {
+  if (!Number.isSafeInteger(fee) || fee <= 0 || fee > MAX_APPROVAL_FEE_SATS) {
+    throw Object.assign(new Error(`transaction fee must be 1-${MAX_APPROVAL_FEE_SATS} satoshis`), { status: 400 });
+  }
+}
+
+// Bind the entire unsigned PSBT, including all signing metadata, as well as
+// the human-reviewable skeleton. Any metadata change requires a new proof.
 function transactionTemplateFromPsbt(psbt) {
   return {
+    unsignedPsbtSha256: createHash('sha256').update(psbt.toBuffer()).digest('hex'),
     version: psbt.version,
     locktime: psbt.locktime,
     inputs: psbt.txInputs.map((input) => ({
@@ -516,7 +567,7 @@ export function createSignerRouter(deps) {
   async function getTxHex(txid) {
     const res = await fetch(`${deps.mempoolBase || 'https://mempool.space/api'}/tx/${txid}/hex`);
     if (!res.ok) throw Object.assign(new Error(`mempool.space responded ${res.status}`), { status: 502 });
-    return (await res.text()).trim();
+    return res.text();
   }
 
   function psbtHasAnySignature(psbt) {
@@ -569,11 +620,8 @@ export function createSignerRouter(deps) {
   // --- POST /v1/signer/session -------------------------------------------
   router.post('/v1/signer/session', keyGuard, (req, res) => {
     const { walletAddress, purpose } = req.body || {};
-    if (!isValidAddress(walletAddress)) {
-      return res.status(400).json({ error: 'walletAddress must be a valid bitcoin address' });
-    }
-    if (typeof purpose !== 'string' || !purpose.trim() || purpose.length > 64) {
-      return res.status(400).json({ error: 'purpose must be a non-empty string (max 64 chars)' });
+    if (!isValidAddress(walletAddress) || typeof purpose !== 'string' || !purpose || purpose.length > 256) {
+      return res.status(400).json({ error: 'walletAddress and purpose are required' });
     }
     const now = Date.now();
     const sessionId = 'bk_sess_' + randomBytes(16).toString('hex');
@@ -586,10 +634,11 @@ export function createSignerRouter(deps) {
       expiresAt: new Date(now + SESSION_TTL_MS).toISOString(),
     };
     sessions.set(sessionId, session);
+    logEvent('signer.session', { sessionId: sessionId.slice(0, 20) + '…', walletAddress: session.walletAddress });
     return res.json(session);
   });
 
-  // --- POST /v1/signer/challenge -----------------------------------------
+  // --- POST /v1/signer/challenge ------------------------------------------
   router.post('/v1/signer/challenge', keyGuard, (req, res) => {
     const { sessionId } = req.body || {};
     if (typeof sessionId !== 'string' || !sessionId) {
@@ -600,16 +649,18 @@ export function createSignerRouter(deps) {
       return res.status(404).json({ error: 'session not found or expired' });
     }
     const now = Date.now();
+    const challengeId = 'bk_ch_' + randomBytes(16).toString('hex');
+    const nonce = 'BK-' + randomBytes(16).toString('hex');
     const challenge = {
-      challengeId: 'bk_ch_' + randomBytes(16).toString('hex'),
+      challengeId,
       sessionId: session.sessionId,
-      nonce: 'BK-' + randomBytes(16).toString('hex'),
+      nonce,
       purpose: session.purpose,
       walletAddress: session.walletAddress,
       expiresAt: new Date(now + SIGNER_CHALLENGE_TTL_MS).toISOString(),
       used: false,
     };
-    signerChallenges.set(challenge.challengeId, challenge);
+    signerChallenges.set(challengeId, challenge);
     logEvent('signer.challenge', { sessionId: session.sessionId.slice(0, 20) + '…' });
     const { used, sessionId: sid, ...pub } = challenge;
     return res.json(pub);
@@ -637,6 +688,7 @@ export function createSignerRouter(deps) {
         if (psbtHasAnySignature(parsed)) {
           return res.status(400).json({ error: 'approval challenge requires an unsigned PSBT' });
         }
+        assertApprovalSigningPolicy(parsed);
         const template = transactionTemplateFromPsbt(parsed);
         if (template.inputs.length < 1 || template.inputs.length > 100 ||
             template.outputs.length < 1 || template.outputs.length > 128) {
@@ -647,9 +699,7 @@ export function createSignerRouter(deps) {
         const inputSum = await verifyApprovalPrevouts(parsed);
         const outputSum = template.outputs.reduce((sum, output) => sum + output.value, 0);
         transactionFeeSats = inputSum - outputSum;
-        if (!Number.isSafeInteger(transactionFeeSats) || transactionFeeSats <= 0) {
-          return res.status(400).json({ error: 'transaction fee must be a positive integer number of satoshis' });
-        }
+        assertApprovalFee(transactionFeeSats);
         transactionOutputLines = template.outputs.map((output, index) => {
           const outputAddress = addressFromScript(Buffer.from(output.scriptHex, 'hex'));
           const walletOutput = outputAddress === address.trim() ? ' (wallet/change)' : '';
@@ -718,25 +768,6 @@ export function createSignerRouter(deps) {
   });
 
   // --- POST /v1/btc/ownership/verify -------------------------------------
-  // The ownership gate: RED -> challenge -> wallet signs the exact challenge
-  // message -> this endpoint checks all six conditions -> GREEN.
-  //
-  //   1. address matches the challenge
-  //   2. exact message matches the challenge (byte-for-byte)
-  //   3. fresh nonce matches — the nonce is unique per challenge and embedded
-  //      in the message, so check 2 implies check 3; asserted explicitly below
-  //   4. challenge has not expired (getChallenge sweeps expired entries)
-  //   5. challenge/nonce has not already been used — single-use. The challenge
-  //      is burned once the binding checks (1-3) pass, before signature
-  //      verification, so each challenge allows exactly one signature
-  //      attempt. Binding failures do NOT burn, so a mistyped submission can
-  //      be retried with a fresh attempt.
-  //   6. signature validates for the address type (verifyOwnershipSignature):
-  //      legacy path for P2PKH/P2SH, genuine BIP-322 for segwit addresses.
-  //
-  // Without a challengeId the endpoint still verifies a bare signature
-  // (legacy behavior), but the response is marked gated:false — it is NOT a
-  // gated ownership proof.
   router.post('/v1/btc/ownership/verify', keyGuard, (req, res) => {
     const { address, message, signature, challengeId } = req.body || {};
     if (!isValidAddress(address) || typeof message !== 'string' || !message ||
@@ -753,34 +784,28 @@ export function createSignerRouter(deps) {
         return res.status(400).json({ valid: false, reason: 'challengeId must be a string' });
       }
       const c = getChallenge(ownershipChallenges, challengeId);
-      // 4. unknown or expired challenge
       if (!c) {
         return res.status(400).json({ valid: false, reason: 'unknown or expired challenge' });
       }
-      // 5. replay protection
       if (c.used) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'challenge already used (replay rejected)' });
       }
-      // 1. address must match the challenge
       if (c.address !== addr) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'address does not match the issued challenge' });
       }
-      // 2. exact message must match the challenge
       if (c.message !== message) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'message does not match the issued challenge' });
       }
-      // 3. fresh nonce must be present in the message
       if (!message.includes(c.nonce)) {
         logEvent('ownership.verify', { address: addr, valid: false, challengeId });
         return res.json({ valid: false, address: addr, challengeId, reason: 'challenge nonce missing from message' });
       }
-      c.used = true; // burn on first attempt: one challenge, one shot
+      c.used = true;
       gated = true;
     }
-    // 6. signature / script validation, routed by address type
     const r = verifyOwnershipSignature(addr, message, signature);
     logEvent('ownership.verify', { address: addr, valid: r.valid, gated, scheme: r.scheme, ...(challengeId ? { challengeId } : {}) });
     return res.json({
@@ -815,11 +840,11 @@ export function createSignerRouter(deps) {
   router.post('/v1/btc/psbt/validate', keyGuard, (req, res) => {
     const { psbt, expected } = req.body || {};
     if (typeof psbt !== 'string' || !psbt || typeof expected !== 'object' || !expected) {
-      return res.status(400).json({ valid: false, verdict: 'REJECT', reasons: ['body must include psbt (base64) and expected'] });
+      return res.status(400).json({ valid: false, verdict: 'REJECT', reasons: ['body must include psbt and expected'] });
     }
-    const r = validatePsbt(psbt, expected);
-    logEvent('psbt.validate', { valid: r.valid, verdict: r.verdict });
-    return res.json(r);
+    const result = validatePsbt(psbt, expected);
+    logEvent('psbt.validate', { valid: result.valid, verdict: result.verdict });
+    return res.json(result);
   });
 
   // --- POST /v1/btc/transaction/approve -----------------------------------
@@ -855,6 +880,11 @@ export function createSignerRouter(deps) {
     }
     if (psbtHasAnySignature(psbt)) {
       return res.status(400).json({ error: 'approval requires an unsigned PSBT; sign only after approval' });
+    }
+    try {
+      assertApprovalSigningPolicy(psbt);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
     const template = transactionTemplateFromPsbt(psbt);
     if (template.inputs.length < 1 || template.inputs.length > 100 ||
@@ -892,6 +922,7 @@ export function createSignerRouter(deps) {
     let inputSum;
     try {
       inputSum = await verifyApprovalPrevouts(psbt);
+      assertApprovalFee(inputSum - template.outputs.reduce((sum, output) => sum + output.value, 0));
     } catch (e) {
       return res.status(e.status || 502).json({ error: e.message || 'could not verify transaction inputs' });
     }
@@ -952,31 +983,18 @@ export function createSignerRouter(deps) {
   router.post('/v1/btc/receipt', keyGuard, (req, res) => {
     const { txid, ...meta } = req.body || {};
     if (typeof txid !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txid)) {
-      return res.status(400).json({ error: 'txid must be 64 hex characters' });
+      return res.status(400).json({ error: 'txid must be a 64-char hex string' });
     }
-    const rec = {
-      txid: txid.toLowerCase(),
-      recordedAt: new Date().toISOString(),
-      meta: sanitizeMeta(meta),
-    };
-    receipts.push(rec);
-    logEvent('receipt', { txid: rec.txid });
+    const entry = { txid: txid.toLowerCase(), recordedAt: new Date().toISOString(), ...sanitizeMeta(meta) };
+    receipts.push(entry);
     try {
-      fs.appendFileSync(RECEIPT_LOG, JSON.stringify(rec) + '\n');
-    } catch (e) { /* file log is best-effort */ }
-    return res.json({ recorded: true, txid: rec.txid });
+      fs.appendFileSync(RECEIPT_LOG, JSON.stringify(entry) + '\n');
+    } catch (_) { /* best-effort durable log */ }
+    logEvent('receipt', { txid: entry.txid });
+    return res.json({ recorded: true, txid: entry.txid });
   });
 
-  // --- GET /events ---------------------------------------------------------
-  // Audit log: newest first. Query ?limit=N (default 50, max 200).
-  // Entries never contain message text, signatures, or PSBTs.
-  router.get('/events', (req, res) => {
-    const limit = parseInt(req.query.limit, 10);
-    const evts = getEvents(limit);
-    return res.json({ count: evts.length, events: evts });
-  });
-
-  // --- POST /v1/btc/bip322/verify ------------------------------------------
+  // --- POST /v1/btc/bip322/verify -----------------------------------------
   // Stateless BIP-322 verification for segwit addresses (P2WPKH,
   // P2SH-P2WPKH, single-key P2TR). No challenge binding here — for the gated
   // ownership proof, use POST /v1/btc/ownership/verify with a challengeId.
@@ -994,6 +1012,13 @@ export function createSignerRouter(deps) {
     const r = verifyBip322Signature(addr, message, signature);
     logEvent('bip322.verify', { address: addr, valid: r.valid });
     return res.json({ valid: r.valid, address: addr, scheme: r.scheme, ...(r.reason ? { reason: r.reason } : {}) });
+  });
+
+  // --- GET /events --------------------------------------------------------
+  router.get('/events', (req, res) => {
+    const limit = req.query.limit != null ? Number(req.query.limit) : 50;
+    const list = getEvents(limit);
+    return res.json({ count: list.length, events: list });
   });
 
   return router;
