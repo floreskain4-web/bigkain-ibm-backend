@@ -639,3 +639,25 @@ export function createSignerRouter(deps) {
 // Test hooks (in-memory stores; not exposed over HTTP)
 export const _stores = { sessions, signerChallenges, ownershipChallenges, receipts, events };
 export const _ttls = { SESSION_TTL_MS, SIGNER_CHALLENGE_TTL_MS, OWNERSHIP_CHALLENGE_TTL_MS };
+    if (!r.valid) {
+      return res.json({
+        valid: false,
+        scheme: r.scheme,
+        ...(r.reason ? { reason: r.reason } : {})
+      });
+    }
+
+    // Promote status only for the configured BigKain address.
+    if (
+      addr === deps.ownershipAddress &&
+      typeof deps.onGatedOwnershipProven === 'function'
+    ) {
+      deps.onGatedOwnershipProven();
+    }
+
+    return res.json({
+      valid: true,
+      scheme: r.scheme,
+      address: addr,
+      challengeId
+    });
