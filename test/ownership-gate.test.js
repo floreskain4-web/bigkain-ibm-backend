@@ -6,7 +6,12 @@ import bitcoreMessage from 'bitcoinjs-message';
 import * as ecc from 'tiny-secp256k1';
 import { Signer as Bip322Signer } from 'bip322-js';
 
-import app from '../server.js';
+// server.js requires OWNERSHIP_ADDRESS at load time.
+if (!process.env.OWNERSHIP_ADDRESS) {
+  process.env.OWNERSHIP_ADDRESS = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa';
+}
+
+const { default: app } = await import('../server.js');
 import * as signer from '../signer.js';
 
 let server;
