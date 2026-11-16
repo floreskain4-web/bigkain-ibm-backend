@@ -1,6 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import app from '../server.js';
+
+// server.js requires OWNERSHIP_ADDRESS at load time.
+if (!process.env.OWNERSHIP_ADDRESS) {
+  process.env.OWNERSHIP_ADDRESS = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa';
+}
+
+const { default: app } = await import('../server.js');
 import {
   calculateFlowSignal,
   FARSIDE_BTC_ALL_DATA_URL,
