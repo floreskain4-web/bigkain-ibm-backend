@@ -11,7 +11,7 @@
  *
  * What it NEVER does:
  *   - Hold private keys, seed phrases, or any signing material
- *   - Sign transactions or broadcast them (it builds UNSIGNED PSBTs only;
+ *   - Sign transactions or broadcast them (it builds UNSSIGNED PSBTs only;
  *     there is deliberately no broadcast endpoint)
  */
 
@@ -30,7 +30,8 @@ app.use(express.json({ limit: "100kb" }));
 const GITHUB_PAGES_ORIGIN = "https://floreskain4-web.github.io";
 const STATUS_ENDPOINTS = new Set(["/health", ETF_FLOW_PATH]);
 app.use((req, res, next) => {
-  if (!STATUS_ENDPOINTS.has(req.path) || !["GET", "OPTIONS"].includes(req.method) ||
+  if (!STATUS_ENDPOINTS.has(req.path) || ![
+"GET", "OPTIONS"].includes(req.method) ||
       req.get("Origin") !== GITHUB_PAGES_ORIGIN) {
     return next();
   }
@@ -49,8 +50,12 @@ const PORT = process.env.PORT || 8080;
 const MEMPOOL_API = process.env.MEMPOOL_API || "https://mempool.space/api";
 const INSUMER_API = "https://api.insumermodel.com/v1";
 
-const OWNERSHIP_ADDRESS =
-  "1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP";
+// Ownership address is configurable via env. Default is a placeholder that must be
+// replaced with YOUR address before deploying — never ship a known exchange wallet.
+const OWNERSHIP_ADDRESS = process.env.OWNERSHIP_ADDRESS;
+if (!OWNERSHIP_ADDRESS) {
+  throw new Error("OWNERSHIP_ADDRESS env var is required");
+}
 
 // Non-custodial: this backend never receives, stores, or handles private keys.
 // Ownership is PROVEN only after a gated challenge verification succeeds for
@@ -125,11 +130,7 @@ app.post("/verify-ownership", (req, res) => {
   }
   const addr = address.trim();
   if (addr.startsWith("bc1")) {
-    return res.json({
-      valid: false,
-      address: addr,
-      reason: "bech32 (bc1...) signatures use BIP-322 and are not supported by this endpoint; use a base58 (1.../3...) address",
-    });
+    return res.json({ valid: false, address: addr, reason: "bech32 (bc1...) signatures use BIP-322 and are not supported by this endpoint; use a base58 (1.../3...) address" });
   }
   let valid = false;
   let reason;
@@ -140,7 +141,7 @@ app.post("/verify-ownership", (req, res) => {
   } catch (e) {
     return res.json({ valid: false, address: addr, reason: e.message });
   }
-  return res.json({ valid, address: addr, ...(reason ? { reason } : {}) });
+  return res.json({ valid, address: addr, ...(reason ? { reason: r.reason } : {}) });
 });
 
 // ---------------------------------------------------------------------------
@@ -202,9 +203,7 @@ app.get("/address/:address/utxos", async (req, res) => {
 app.post("/attest", async (req, res) => {
   const apiKey = process.env.INSUMER_API_KEY;
   if (!apiKey) {
-    return res.status(501).json({
-      error: "Insumer attestation is not configured (INSUMER_API_KEY not set)",
-    });
+    return res.status(501).json({ error: "Insumer attestation is not configured (INSUMER_API_KEY not set)" });
   }
   const { bitcoinWallet, conditions, format } = req.body || {};
   if (!isValidAddress(bitcoinWallet) || !Array.isArray(conditions) || !conditions.length) {
