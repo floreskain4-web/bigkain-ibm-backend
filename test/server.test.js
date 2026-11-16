@@ -5,7 +5,14 @@ import { payments } from 'bitcoinjs-lib';
 import * as ecc from 'tiny-secp256k1';
 import { randomBytes } from 'node:crypto';
 
-import app from '../server.js';
+// server.js requires OWNERSHIP_ADDRESS at load time. Use a stable fixture
+// (genesis block address) so tests never depend on a real or exchange wallet.
+if (!process.env.OWNERSHIP_ADDRESS) {
+  process.env.OWNERSHIP_ADDRESS = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa';
+}
+const EXPECTED_OWNERSHIP = process.env.OWNERSHIP_ADDRESS;
+
+const { default: app } = await import('../server.js');
 
 let server;
 let base;
@@ -25,7 +32,7 @@ describe('GET /health', () => {
     assert.equal(body.ok, true);
     assert.equal(body.service, 'bigkain-backend');
     assert.equal(body.network, 'bitcoin-mainnet');
-    assert.equal(body.ownership_address, '1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP');
+    assert.equal(body.ownership_address, EXPECTED_OWNERSHIP);
     assert.equal(body.private_keys_received, false);
     assert.ok('ownership_proof' in body);
   });
