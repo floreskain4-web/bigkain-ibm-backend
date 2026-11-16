@@ -4,7 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import app from '../server.js';
+// server.js requires OWNERSHIP_ADDRESS at load time.
+if (!process.env.OWNERSHIP_ADDRESS) {
+  process.env.OWNERSHIP_ADDRESS = '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa';
+}
+
+const { default: app } = await import('../server.js');
 import Bip322 from 'bip322-js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -185,7 +190,7 @@ describe('POST /v1/btc/bip322/verify (official BIP-322 vectors)', () => {
   });
 
   test('P2PKH address is routed to the legacy endpoint', async () => {
-    const r = await post('/v1/btc/bip322/verify', { address: '1Ay8vMC7R1UbyCCZRVULMV7iQpHSAbguJP', message: VEC_MSG, signature: VEC_SIMPLE_SIG });
+    const r = await post('/v1/btc/bip322/verify', { address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', message: VEC_MSG, signature: VEC_SIMPLE_SIG });
     assert.equal(r.status, 200);
     assert.equal(r.body.valid, false);
     assert.match(r.body.reason, /legacy/);
